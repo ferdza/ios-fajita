@@ -1,0 +1,27 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 7c02619..24fccc0 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -37,6 +37,7 @@
+ #include "SweetSurface.h"
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
++extern "C" void flush_dcache64(addr64_t addr, unsigned length, boolean_t phys);
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -467,6 +468,14 @@ AppleCLCD::present(const uint8_t *rec)
+ 			src = 0;
+ 		}
+ 		if (src != 0 && bpe == 4) {
++			/*
++			 * The GPU writes these surfaces straight to RAM; this kernel alias is cacheable, so
++			 * lines kept from an earlier present of the same buffer would show an old frame
++			 * (the repeating frames under Metal). Clean+invalidate by VA before reading: no
++			 * phystokv, so pages below gPhysBase are fine, and CPU-drawn surfaces lose nothing.
++			 */
++			flush_dcache64((addr64_t)(src + s->offset + (uint64_t)sy * s->bytesPerRow),
++			    (unsigned)((uint64_t)(h - 1) * s->bytesPerRow + (uint64_t)(sx + w) * 4), FALSE);
+ 			for (int32_t y = 0; y < h; y++) {
+ 				const uint8_t *row = (const uint8_t *)(src + s->offset +
+ 				    (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4);
