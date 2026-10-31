@@ -174,6 +174,17 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   `gem_flush()` cleans+invalidates any BO via physical segments: used for every BO at submit (surfaces were never
   cleaned before), after CPU_PREP waits for cacheable BOs, and in BO_SYNC (was a no-op dsb). gemNew's failure path
   now also frees arena pages. CI `41227113561` -> `xnu/out-0182`; image `shim/out/shim-boot-0182-metal.img` (40 MiB).
+- **0182 boot panicked** (photo 20261031_181552): `phystokv_range: illegal PA 0xd1d80000; phys base 0x100000000`,
+  SpringBoard, in `IOMemoryDescriptor::makeMapping <- is_io_connect_map_memory_into_task`. Ordinary pages CAN lie
+  below gPhysBase (0x80000000-0xffffffff bank); they are fine until something needs phystokv: libdrm maps BOs
+  `kIOMapWriteCombineCache`, the cache-mode change on those pages panics (IOSurfaces are mapped default-cache,
+  hence safe). `mapClientMemory64` is not virtual (user flags win), so the fix needs userspace. My 0182 gem_flush
+  also cleaned by PA (same panic). **0183**: non-arena BOs cleaned by kernel VA (`flush_dcache64(kva, len, FALSE)`),
+  CPU_PREP cleans every BO; **`tools/mesa-ios/sweet-drm-default-cache.patch`**: IOConnectMapMemory64 with
+  kIOMapAnywhere|kIOMapDefaultCache (verified `mov w5, #0x1`). build-bgair now always rebuilds libdrm from a
+  patched copy (`-I $BERG/gpu/freedreno-sweet` for its relative include). CI `41229013405` -> `xnu/out-0183`
+  SHA256 `2be7c335...`; image `shim/out/shim-boot-0183-metal.img`. libdrm md5 `5991d09b70ec...` needs the sudo
+  install + reflash before testing.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
