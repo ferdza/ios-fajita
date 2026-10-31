@@ -1,0 +1,12 @@
+--- a/sweet_drm.c	2026-10-31 18:20:43.899704765 +0000
++++ b/sweet_drm.c	2026-10-31 18:20:43.905994250 +0000
+@@ -987,7 +987,8 @@
+ 		return mmap(addr, len, prot, flags, fd, off);
+ 	}
+ 	kern_return_t kr = IOConnectMapMemory64(g_conn, (uint32_t)off, mach_task_self(), &a, &s,
+-	    kIOMapAnywhere | kIOMapWriteCombineCache);
++	    kIOMapAnywhere | kIOMapDefaultCache);   /* fajita: WC remaps change page attributes, which panics
++	                                              * for pages below gPhysBase; the kernel cleans caches (0183) */
+ 	if (kr != KERN_SUCCESS || s < len) {
+ 		if (kr == KERN_SUCCESS) {
+ 			IOConnectUnmapMemory64(g_conn, (uint32_t)off, mach_task_self(), a);

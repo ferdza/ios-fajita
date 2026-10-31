@@ -62,14 +62,15 @@ PY
 
 # --- pkg-config for the iOS target --------------------------------------------------
 mkdir -p "$W/pc" "$W/drm-link"
-# Bergamota's libdrm stand-in (sweet_drm.c: drm ioctls -> the SweetAdreno630 IOKit user client)
-if [ ! -f "$HOME/ios-userland/libdrm.2.dylib" ]; then
-    mkdir -p "$HOME/ios-userland"
-    clang --target=arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -dynamiclib \
-        -install_name @rpath/libdrm.2.dylib -current_version 2.4.0 -compatibility_version 2.0.0 \
-        -fuse-ld=lld -L "$SDK/usr/lib" -lSystem "$BERG/gpu/freedreno-sweet/sweet_drm.c" \
-        -o "$HOME/ios-userland/libdrm.2.dylib" -framework IOKit -framework CoreFoundation
-fi
+# Bergamota's libdrm stand-in (sweet_drm.c: drm ioctls -> the SweetAdreno630 IOKit user client),
+# built every run from a patched copy (tools/mesa-ios/sweet-drm-*.patch)
+mkdir -p "$HOME/ios-userland" "$W/drm-src"
+cp -f "$BERG/gpu/freedreno-sweet/sweet_drm.c" "$W/drm-src/sweet_drm.c"
+for p in "$HERE"/mesa-ios/sweet-drm-*.patch; do patch -s -p1 -d "$W/drm-src" < "$p"; done
+clang --target=arm64-apple-ios16.0 -isysroot "$SDK" -O2 -Wall -dynamiclib \
+    -install_name @rpath/libdrm.2.dylib -current_version 2.4.0 -compatibility_version 2.0.0 \
+    -I "$BERG/gpu/freedreno-sweet" -fuse-ld=lld -L "$SDK/usr/lib" -lSystem "$W/drm-src/sweet_drm.c" \
+    -o "$HOME/ios-userland/libdrm.2.dylib" -framework IOKit -framework CoreFoundation
 cp -f "$HOME/ios-userland/libdrm.2.dylib" "$W/drm-link/"
 ln -sf libdrm.2.dylib "$W/drm-link/libdrm.dylib"
 cat > "$W/pc/libdrm.pc" <<EOP

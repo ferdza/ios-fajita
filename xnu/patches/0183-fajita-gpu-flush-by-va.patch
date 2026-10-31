@@ -1,0 +1,50 @@
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index 2f816da..272f09a 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -558,9 +558,10 @@ SweetAdrenoUserClient::gemInfo(struct sweet_msm_gem_info *r)
+ }
+ 
+ /*
+- * Clean+invalidate [off, off+len) of a BO through the linear map. Arena BOs are one physical
+- * run; ordinary-memory and surface BOs are walked segment by segment (the pages are not
+- * contiguous). flush_dcache64() works by physical address, so it reaches every alias.
++ * Clean+invalidate [off, off+len) of a BO. Arena BOs (above gPhysBase) go through the linear map
++ * by physical address. Every other BO is cleaned through its kernel virtual alias: ordinary
++ * pages on this port may lie below gPhysBase, where phystokv panics (the 0182 boot), and the
++ * data cache is physically tagged, so cleaning one alias cleans the line for all of them.
+  */
+ static void
+ gem_flush(struct sweet_gem *g, uint64_t off, uint64_t len)
+@@ -573,18 +574,8 @@ gem_flush(struct sweet_gem *g, uint64_t off, uint64_t len)
+ 	}
+ 	if (g->pa != 0) {
+ 		flush_dcache64((addr64_t)(g->pa + off), (unsigned)len, TRUE);
+-		return;
+-	}
+-	while (len > 0) {
+-		IOByteCount seg = 0;
+-		addr64_t pa = g->md->getPhysicalSegment(off, &seg, kIOMemoryMapperNone);
+-		if (pa == 0 || seg == 0) {
+-			return;
+-		}
+-		uint64_t n = seg < len ? seg : len;
+-		flush_dcache64(pa, (unsigned)n, TRUE);
+-		off += n;
+-		len -= n;
++	} else if (g->kva != NULL) {
++		flush_dcache64((addr64_t)(uintptr_t)(g->kva + off), (unsigned)len, FALSE);
+ 	}
+ }
+ 
+@@ -605,8 +596,8 @@ SweetAdrenoUserClient::cpuPrep(struct sweet_msm_gem_cpu_prep *r)
+ 			}
+ 			if (!waitFence(f, ns)) {
+ 				ret = kIOReturnTimeout;
+-			} else if (g->pa == 0) {
+-				gem_flush(g, 0, g->size);       /* cacheable memory: drop lines the GPU overwrote */
++			} else {
++				gem_flush(g, 0, g->size);       /* the client maps BOs cacheable: drop lines the GPU overwrote */
+ 			}
+ 		} else if (g->lastFence != 0 && !sweet_gpu_fence_done((r->op & SWEET_MSM_PREP_WRITE) ? g->lastFence : g->lastWrite)) {
+ 			ret = kIOReturnBusy;
