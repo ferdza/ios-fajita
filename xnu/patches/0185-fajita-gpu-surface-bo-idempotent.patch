@@ -1,0 +1,25 @@
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index 272f09a..b42228c 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -850,6 +850,20 @@ SweetAdrenoUserClient::surfaceBo(struct sweet_gpu_surface_bo *r)
+ 	if (!sweet_gpu_ready()) {
+ 		ret = kIOReturnNotReady;
+ 	} else {
++		/*
++		 * Idempotent, as the client expects (Linux's prime import of the same dma-buf gives the
++		 * same handle): a surface this client has already imported keeps its one BO. Making a
++		 * new 14 MB mapping on every call used up the 1 GiB GPU address space in ~70 frames.
++		 */
++		for (uint32_t i = 0; i < GEM_MAX; i++) {
++			if (fGems[i].md != NULL && fGems[i].surface == s) {
++				r->handle = i + 1;
++				r->iova = fGems[i].iova;
++				IOLockUnlock(gAdrenoLock);
++				s->release();
++				return kIOReturnSuccess;
++			}
++		}
+ 		for (uint32_t n = 0; n < GEM_MAX; n++) {
+ 			uint32_t i = (fNextGem + n) % GEM_MAX;
+ 			if (fGems[i].md == NULL) {
