@@ -1,0 +1,138 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index c784a9b..206c05e 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1999,18 +1999,20 @@ sweet_gpu_report(const char *why)
+  * faulted, once per fence. Only reads, except the SQE stat index (Linux's a6xx crash dump
+  * does the same); nothing is reset or cleared, so a second dump shows the same state.
+  */
+-void
++/* Returns the faulting address of context bank 1 (the GPU's) when it dumped now, else 0. */
++uint64_t
+ sweet_gpu_hang_dump(const char *why)
+ {
++	uint64_t far1 = 0;
+ 	static uint32_t dumped;
+ 	vm_offset_t c = gpu_core;
+ 
+ 	if (!gpu_live || c == 0 || gpu_blob == 0) {
+ 		printf("SWEET GPU HANG (%s): GPU not live, nothing to read\n", why);
+-		return;
++		return 0;
+ 	}
+ 	if (dumped == gpu_cp_seq) {
+-		return;
++		return 0;
+ 	}
+ 	dumped = gpu_cp_seq;
+ 	printf("SWEET GPU HANG (%s): fence at %u, last submitted %u; ring rptr %u wptr %u\n", why,
+@@ -2040,7 +2042,7 @@ sweet_gpu_hang_dump(const char *why)
+ 	}
+ 	if (gpu_smmu == 0) {
+ 		printf("SWEET GPU HANG: smmu not mapped\n");
+-		return;
++		return 0;
+ 	}
+ 	printf("SWEET GPU HANG: smmu sGFSR %#x\n", gpu_rd_quiet(gpu_smmu, GPU_SMMU_SGFSR));
+ 	for (unsigned cb = 0; cb < 2; cb++) {
+@@ -2049,7 +2051,11 @@ sweet_gpu_hang_dump(const char *why)
+ 		    gpu_rd_quiet(b, GPU_SMMU_CB_FSR),
+ 		    (uint64_t)gpu_rd_quiet(b, GPU_SMMU_CB_FAR + 4) << 32 | gpu_rd_quiet(b, GPU_SMMU_CB_FAR),
+ 		    gpu_rd_quiet(b, GPU_SMMU_CB_FSYNR0), gpu_rd_quiet(b, GPU_SMMU_CB_FSYNR1));
++		if (cb == 1 && (gpu_rd_quiet(b, GPU_SMMU_CB_FSR) & 0x2)) {
++			far1 = (uint64_t)gpu_rd_quiet(b, GPU_SMMU_CB_FAR + 4) << 32 | gpu_rd_quiet(b, GPU_SMMU_CB_FAR);
++		}
+ 	}
++	return far1;
+ }
+ 
+ /* ---- stage 8g: memory for the IOKit client ------------------------------------------ */
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index b42228c..7cbbc59 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -55,7 +55,7 @@ bool sweet_gpu_fence_done(uint32_t fence);
+ uint32_t sweet_gpu_fence_last(void);
+ void sweet_gpu_mark_lost(void);
+ void sweet_gpu_report(const char *why);
+-void sweet_gpu_hang_dump(const char *why);
++uint64_t sweet_gpu_hang_dump(const char *why);
+ bool     sweet_gpu_alloc_pages(uint64_t size, uint64_t *pa, void **kva);
+ void     sweet_gpu_free_pages(uint64_t pa, uint64_t size);
+ /* osfmk/arm64/caches_asm.s: clean the dcache for a physical range via the linear map. */
+@@ -121,6 +121,7 @@ class SweetAdrenoUserClient : public IOUserClient {
+ 	IOReturn submit(struct sweet_msm_gem_submit *r);
+ 	IOReturn waitFenceCall(struct sweet_msm_wait_fence *r);
+ 	IOReturn surfaceBo(struct sweet_gpu_surface_bo *r);
++	void findAddress(uint64_t far);
+ 	IOReturn boSync(struct sweet_gpu_bo_sync *r);
+ 
+ public:
+@@ -774,6 +775,55 @@ out:
+ 	return ret;
+ }
+ 
++/*
++ * Hang diagnostics (lock held): which of this client's BOs hold the faulting address, or
++ * its high word next to a nearby low word, and which BO the low 32 bits would land in.
++ * The GPU computed the address from memory somewhere; this names the buffer and offset.
++ */
++void
++SweetAdrenoUserClient::findAddress(uint64_t far)
++{
++	uint32_t hi = (uint32_t)(far >> 32), lo = (uint32_t)far;
++	unsigned hits = 0;
++
++	IOLog("SWEET GPU FIND: looking for %#llx (hi %#x lo %#x) in this client's BOs\n", far, hi, lo);
++	for (uint32_t i = 0; i < GEM_MAX; i++) {
++		struct sweet_gem *g = &fGems[i];
++		if (g->md == NULL) {
++			continue;
++		}
++		bool contains = (g->iova <= lo && lo < g->iova + g->size) ||
++		    (g->iova <= (lo | 0x80000000u) && (lo | 0x80000000u) < g->iova + g->size);
++		if (contains) {
++			IOLog("SWEET GPU FIND: lo %#x (or %#x) falls in bo %u iova %#llx size %llu%s\n", lo, lo | 0x80000000u,
++			    i + 1, g->iova, g->size, g->surface ? " (surface)" : "");
++		}
++		if (g->kva == NULL || hi == 0) {
++			continue;
++		}
++		volatile uint32_t *p = (volatile uint32_t *)(void *)g->kva;
++		uint64_t n = g->size / 4;
++		for (uint64_t k = 1; k < n && hits < 8; k++) {
++			if (p[k] != hi) {
++				continue;
++			}
++			uint32_t d = p[k - 1] > lo ? p[k - 1] - lo : lo - p[k - 1];
++			if (d > 0x01000000u) {
++				continue;
++			}
++			hits++;
++			uint64_t a = k >= 8 ? k - 8 : 0, b = k + 8 < n ? k + 8 : n - 1;
++			IOLog("SWEET GPU FIND: bo %u iova %#llx size %llu%s: pair at +%#llx (iova %#llx) = %#x %#x\n", i + 1, g->iova,
++			    g->size, g->surface ? " (surface)" : "", (k - 1) * 4, g->iova + (k - 1) * 4, p[k - 1], p[k]);
++			for (uint64_t j = a; j <= b; j += 4) {
++				IOLog("SWEET GPU FIND:   +%#06llx: %#010x %#010x %#010x %#010x\n", j * 4, p[j],
++				    j + 1 <= b ? p[j + 1] : 0, j + 2 <= b ? p[j + 2] : 0, j + 3 <= b ? p[j + 3] : 0);
++			}
++		}
++	}
++	IOLog("SWEET GPU FIND: %u pair(s) found\n", hits);
++}
++
+ IOReturn
+ SweetAdrenoUserClient::waitFenceCall(struct sweet_msm_wait_fence *r)
+ {
+@@ -791,7 +841,10 @@ SweetAdrenoUserClient::waitFenceCall(struct sweet_msm_wait_fence *r)
+ 		IOLog("SWEET ADRENO: wait fence %u (%llu ns) -> %#x, last %u\n", r->fence,
+ 		    (unsigned long long)ns, ret, sweet_gpu_fence_last());
+ 		if (ret == kIOReturnTimeout) {
+-			sweet_gpu_hang_dump("wait fence");
++			uint64_t far = sweet_gpu_hang_dump("wait fence");
++			if (far != 0) {
++				findAddress(far);
++			}
+ 		}
+ 		/*
+ 		 * The client's own output does not reach the console (launchd gives it a stdout nobody
