@@ -238,6 +238,19 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   UI. The widened import is the prime suspect (first jobs after the change). Diagnostic library (md5 `846e6278...`):
   same acceptance + `fajita import: IOSurface N (WxH, pitch P) as MTLPixelFormat F (name) wxh type t usage u mips m
   samples s` on stderr for the first 32 foreign-format imports of 2-plane surfaces. Needs sudo install + reflash.
+- **Diagnostic boot 23:30 UTC (`logs/sweetlog-1031-diag.txt`):** QuartzCore imports display surfaces 2/3 as
+  **MTLPixelFormat 554 (BGR10_XR)**, 1125x2436, type 2D, usage 0x5 (ShaderRead|RenderTarget), 1 mip, 1 sample - the
+  only foreign format. Chlorophyll maps 554 to B8G8R8A8 (wrong layout for these 10-bit words). Hang pattern identical
+  to the 22:43 boot: fence 5 done -> surface 2 imported as 554 -> **job 6 (first job after the import) never retires**;
+  SMMU cb1 FSR 0x402 FAR **0x130600e46xxxx** (above the 48-bit range, FSYNR0 0 = level-0 lookup): the GPU computed a
+  garbage address. A pure format mismatch would not do that, so the 554 resource/texture state itself is suspect
+  (descriptor fields, or two resources of different formats over the one surface BO now that SURFACE_BO is
+  idempotent). NOT resolved.
+  **Next steps (in order):** (1) in the hang dump, dump the hung IB (ib1 base, 256 dwords) and the BOs it references, to
+  see the descriptor that holds 0x130600e4...; (2) map 554/555 to B10G10R10X2_UNORM like 550/551 (correct colours
+  either way); (3) if the hang is the dual-format aliasing, import 554 as the SAME pipe format as 550 (one layout).
+  Until then, the shipping state is the CPU-drawn UI (boot_a = 0177r-gpu-nometal); the last Metal state without
+  hangs is the 0185/0186 library (2-plane import for 550/551 only), which draws the UI but leaves stale regions.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
