@@ -38,7 +38,7 @@ if [ "$state" = recovery ] && [ "$boot" != - ]; then
 	mkdir -p ~/ios-fajita-backups
 	bk=~/ios-fajita-backups/boot${slot}-$(date +%Y%m%d-%H%M%S).img
 	log "backing up boot$slot to $bk"
-	adb exec-out "dd if=/dev/block/by-name/boot$slot bs=1048576 2>/dev/null" > "$bk"
+	adb exec-out "for d in /dev/block/by-name /dev/block/bootdevice/by-name; do [ -e \$d/boot$slot ] && exec dd if=\$d/boot$slot bs=1048576 2>/dev/null; done" > "$bk"
 	log "backup: $(stat -c %s "$bk") bytes, sha256 $(sha256sum "$bk" | cut -c1-16)..."
 	[ -s "$bk" ] || { echo "boot backup is empty; stopping" >&2; exit 1; }
 elif [ "$boot" != - ]; then
