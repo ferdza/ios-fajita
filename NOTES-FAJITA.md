@@ -203,6 +203,18 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   SHA256 `10f5f34a...`; image `shim/out/shim-boot-0185-metal.img`.
   Also one real hang (fence 64): SMMU cb1 FSR 0x402 **FAR 0xf00**, FSYNR0 0x11 (write) - GPU wrote near address 0,
   i.e. a draw with an unbound/zero-iova target, most likely fallout of the refused surfaces. Recheck after 0185.
+- **MILESTONE 0185 (21:15 UTC, `logs/sweetlog-1031-0185.txt`, videos 20261031_212129/212344): iOS UI drawn by the
+  GPU through Metal** - lock screen, home screen, Control Center with its blur, sliders. 610 submits, 0 hangs,
+  0 VA exhaustion, 0 backboardd crashes, no panic. Symptom: screen sometimes shows a sequence of OLD frames.
+  Cause (reasoned, not measured): present() reads the surface through its cacheable kernel alias while the GPU
+  wrote RAM directly; lines cached from an earlier present of the same buffer (double-buffered 2/3) show the old
+  frame. **0186**: clean+invalidate the source rows by VA before the copy. CI `41243600622` -> `xnu/out-0186`
+  SHA256 `ce68870d...`; image `shim/out/shim-boot-0186-metal.img`.
+  Still open: ~790x per surface `texture refused ... IOSurface 2/3 (planes 2)` = the display surfaces sampled as a
+  texture in a format other than 550/551 (blur/backdrop input; the import's format check needs the requested
+  format logged); IOSurfaces 6/9/10/11 have a row pitch not a multiple of 64 (freedreno refuses: need a kernel
+  side 64-byte row alignment for surfaces or a copy); 540 arena misses fall back to ordinary memory fine;
+  `draw skipped: std_vert0_lph reads buffer 3 and 3 buffers were bound` (4x).
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
