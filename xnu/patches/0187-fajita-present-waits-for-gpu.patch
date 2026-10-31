@@ -1,0 +1,69 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 24fccc0..e1e8ae5 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -38,6 +38,10 @@
+ 
+ extern "C" int sweet_console_muted;     /* osfmk/console/serial_console.c */
+ extern "C" void flush_dcache64(addr64_t addr, unsigned length, boolean_t phys);
++/* bsd/dev/sweet_gpu.c; plain reads, safe without gAdrenoLock */
++extern "C" bool sweet_gpu_ready(void);
++extern "C" bool sweet_gpu_fence_done(uint32_t fence);
++extern "C" uint32_t sweet_gpu_fence_last(void);
+ 
+ #if defined(SWEET)
+ #include <IOKit/IOService.h>
+@@ -115,6 +119,7 @@ public:
+ 	bool          fConsolePaused;
+ 	uint8_t       fPending[SWEET_FB_SWAP_REC_SIZE];     /* latest swap, not yet shown */
+ 	bool          fDirty;
++	uint32_t      fPendingFence;  /* last GPU fence submitted before that swap */
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+@@ -299,15 +304,37 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
+ 	uint8_t *rec = NULL;
++	uint32_t fence = 0;
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+ 		if (rec != NULL) {
+ 			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
++			fence = fb->fPendingFence;
+ 			fb->fDirty = false;
+ 		}
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
++		/*
++		 * Under Metal, SwapEnd arrives while the GPU is still drawing that frame (the commit is
++		 * asynchronous), so copying now shows what the buffer held two swaps ago - the
++		 * "repeating old frames". Wait for every submission made before the swap; CPU-drawn
++		 * frames (fence 0) and a lost GPU skip the wait.
++		 */
++		static uint32_t presents, waited, timedout;
++		if (fence != 0 && sweet_gpu_ready() && !sweet_gpu_fence_done(fence)) {
++			waited++;
++			for (int ms = 0; !sweet_gpu_fence_done(fence); ms++) {
++				if (ms >= 50 || !sweet_gpu_ready()) {
++					timedout++;
++					break;
++				}
++				IOSleep(1);
++			}
++		}
++		if ((++presents % 100) == 0) {
++			IOLog("SWEET FB: %u presents, %u waited for the GPU, %u timed out\n", presents, waited, timedout);
++		}
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
+ 	}
+@@ -356,6 +383,7 @@ AppleCLCD::swap(const uint8_t *rec)
+ {
+ 	IOLockLock(fLock);
+ 	memcpy(fPending, rec, SWEET_FB_SWAP_REC_SIZE);
++	fPendingFence = sweet_gpu_fence_last();
+ 	fDirty = true;
+ 	IOLockUnlock(fLock);
+ 	if ((++sweet_fb_swap_count % 1000) == 0) {
