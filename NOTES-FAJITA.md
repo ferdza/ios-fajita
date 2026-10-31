@@ -215,6 +215,13 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   format logged); IOSurfaces 6/9/10/11 have a row pitch not a multiple of 64 (freedreno refuses: need a kernel
   side 64-byte row alignment for surfaces or a copy); 540 arena misses fall back to ordinary memory fine;
   `draw skipped: std_vert0_lph reads buffer 3 and 3 buffers were bound` (4x).
+- **0186 did not help** (video 20261031_214054, `logs/sweetlog-1031-0186.txt`: 491 submits, 0 hangs). New
+  hypothesis from the code: SwapEnd only records the frame and the vsync timer copies it later (10 Hz), and
+  nothing waits for the GPU - with Metal the commit is asynchronous, so the copy can read the buffer before the
+  frame is drawn (= its content from two swaps ago). **0187**: swap() records `sweet_gpu_fence_last()`; the timer
+  waits (IOSleep 1 ms, max 50 ms) until that fence is done before present(), skipped for fence 0 / lost GPU, and
+  logs `SWEET FB: N presents, W waited for the GPU, T timed out` every 100 presents (W > 0 confirms the
+  hypothesis). CI `41245130528` -> `xnu/out-0187` SHA256 `b8e64e5a...`; image `shim/out/shim-boot-0187-metal.img`.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
