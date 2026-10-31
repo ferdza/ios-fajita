@@ -232,6 +232,12 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   buffer's content from two swaps ago. **Fix (userspace):** chlorophyll-2plane-colour now accepts any 4-byte format on
   the colour plane and its refusal names the MTLPixelFormat. libbgair md5 `7c0ac3ea803f...` - needs the sudo install
   + reflash; test kernel stays `shim/out/shim-boot-0187-metal.img`.
+- **22:43 UTC boot (0187 + libbgair accepting any 4-byte format on 2-plane surfaces, `logs/sweetlog-1031-0187b.txt`):
+  stuck on the Apple logo.** GPU hang after 14 submits: fence at 5, jobs 6..9 never retire; SMMU cb1 FSR 0x402
+  **FAR 0x130600e462280** (garbage address, read), CP idle (ib1/ib2 rem 0). backboardd then crashes 5x (sig 11) -> no
+  UI. The widened import is the prime suspect (first jobs after the change). Diagnostic library (md5 `846e6278...`):
+  same acceptance + `fajita import: IOSurface N (WxH, pitch P) as MTLPixelFormat F (name) wxh type t usage u mips m
+  samples s` on stderr for the first 32 foreign-format imports of 2-plane surfaces. Needs sudo install + reflash.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs

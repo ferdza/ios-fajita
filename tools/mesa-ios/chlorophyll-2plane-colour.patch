@@ -1,6 +1,6 @@
 --- a/air/air_metal.c	2026-10-31 22:02:51.460926476 +0000
-+++ b/air/air_metal.c	2026-10-31 22:02:51.467954533 +0000
-@@ -1663,7 +1663,18 @@
++++ b/air/air_metal.c	2026-10-31 22:53:27.852041822 +0000
+@@ -1663,7 +1663,26 @@
        } else {
           sr = sweet_drm_surface_bo(-1, &sb);
        }
@@ -15,6 +15,14 @@
 +                            "imported", import->id, sb.planes, shape->pixel_format, fmt->name);
 +         free(texture);
 +         return NULL;
++      }
++      if (sr == 0 && sb.planes > 1 && shape->pixel_format != 550 && shape->pixel_format != 551) {
++         /* fajita diagnostic: which other formats read the display surfaces (the first such import hung the GPU) */
++         static unsigned told;
++         if (told++ < 32)
++            fprintf(stderr, "fajita import: IOSurface %d (%ux%u, pitch %u) as MTLPixelFormat %u (%s) %ux%u type %u usage %#x "
++                            "mips %u samples %u\n", import->id, sb.width, sb.height, sb.bytes_per_row, shape->pixel_format,
++                    fmt->name, width, height, shape->type, shape->usage, shape->mip_levels, shape->sample_count);
 +      }
 +      if (sr != 0 || (sb.planes > 1 && !colour_plane) || sb.bytes_per_row == 0) {
           say(why, why_size, "the kernel would not describe IOSurface %d (error %d, planes %u, %u bytes a row): it knows nothing of an ID that "
