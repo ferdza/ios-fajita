@@ -1,0 +1,188 @@
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index c5b70a3..2f816da 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -72,13 +72,15 @@ void SweetAdrenoPublish(void);
+ #define WAIT_PATIENCE_MS        5000    /* a wait that asks for more than this is cut here and the GPU declared lost */
+ #define CLOSE_PATIENCE_MS       2000
+ #define IOVA_UNSET              0
++#define GEM_VM_MAX              (768ull << 20)  /* ordinary kernel memory GEM_NEW may wire once the arena is full */
+ 
+ static IOLock *gAdrenoLock;
+ static uint32_t gAdrenoClients;
++static uint64_t gAdrenoVmBytes;         /* GEM_NEW BOs in ordinary memory, under gAdrenoLock */
+ 
+ struct sweet_gem {
+ 	IOMemoryDescriptor       *md;           /* NULL: free slot */
+-	IOBufferMemoryDescriptor *buf;          /* == md for BOs made by GEM_NEW, else NULL */
++	IOBufferMemoryDescriptor *buf;          /* == md for GEM_NEW BOs in ordinary memory, else NULL */
+ 	SweetSurface             *surface;      /* retained for surface BOs */
+ 	uint8_t                  *kva;          /* kernel alias (write-combined for GEM_NEW BOs) */
+ 	uint64_t                  pa;           /* arena physical address for GEM_NEW BOs, else 0 */
+@@ -328,6 +330,9 @@ SweetAdrenoUserClient::releaseGem(struct sweet_gem *g)
+ 			/* Arena memory goes back to the free list; a leaked BO keeps it, on purpose. */
+ 			sweet_gpu_free_pages(g->pa, g->size);
+ 		}
++		if (g->buf != NULL) {
++			gAdrenoVmBytes -= g->size;          /* ordinary memory: released with md below */
++		}
+ 	}
+ 	OSSafeReleaseNULL(g->md);
+ 	g->buf = NULL;
+@@ -405,16 +410,51 @@ SweetAdrenoUserClient::gemNew(struct sweet_msm_gem_new *r)
+ 	 */
+ 	uint64_t pa = 0;
+ 	void *akva = NULL;
+-	if (!sweet_gpu_alloc_pages(size, &pa, &akva)) {
+-		return kIOReturnNoMemory;
+-	}
+-	IOMemoryDescriptor *buf = IOMemoryDescriptor::withPhysicalAddress(
+-	    (IOPhysicalAddress)pa, (IOByteCount)size, kIODirectionInOut);
+-	if (buf == NULL) {
+-		sweet_gpu_free_pages(pa, size);
+-		return kIOReturnNoMemory;
++	IOMemoryDescriptor *buf = NULL;
++	uint8_t *kva;
++	if (sweet_gpu_alloc_pages(size, &pa, &akva)) {
++		buf = IOMemoryDescriptor::withPhysicalAddress(
++		    (IOPhysicalAddress)pa, (IOByteCount)size, kIODirectionInOut);
++		if (buf == NULL) {
++			sweet_gpu_free_pages(pa, size);
++			return kIOReturnNoMemory;
++		}
++		kva = (uint8_t *)akva;
++	} else {
++		/*
++		 * Arena full: ordinary wired kernel memory, allocated exactly as SweetSurface allocates
++		 * IOSurfaces (inTaskWithOptions, no contiguity, no physical mask). Those pages are valid
++		 * for pmap and the GPU already renders into them through SURFACE_BO; only contiguous
++		 * allocations (kmem_alloc_contig) returned the pages below gPhysBase that panic.
++		 * Cacheable: submit, CPU_PREP and BO_SYNC clean them through gem_flush().
++		 */
++		IOLockLock(gAdrenoLock);
++		bool room = gAdrenoVmBytes + size <= GEM_VM_MAX;
++		if (room) {
++			gAdrenoVmBytes += size;
++		}
++		IOLockUnlock(gAdrenoLock);
++		IOBufferMemoryDescriptor *vm = room ? IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task,
++		    kIODirectionInOut | kIOMemoryKernelUserShared, size, page_size) : NULL;
++		if (vm == NULL) {
++			IOLockLock(gAdrenoLock);
++			if (room) {
++				gAdrenoVmBytes -= size;
++			}
++			IOLockUnlock(gAdrenoLock);
++			IOLog("SWEET GPU: GEM_NEW %llu bytes: arena full and %s\n", size,
++			    room ? "the kernel allocation failed" : "the ordinary-memory cap is reached");
++			return kIOReturnNoMemory;
++		}
++		bzero(vm->getBytesNoCopy(), size);
++		buf = vm;
++		kva = (uint8_t *)vm->getBytesNoCopy();
++		static uint32_t told;
++		if (told++ < 8) {
++			IOLog("SWEET GPU: GEM_NEW %llu bytes from ordinary memory (%llu MiB in use)\n",
++			    size, gAdrenoVmBytes >> 20);
++		}
+ 	}
+-	uint8_t *kva = (uint8_t *)akva;
+ 	/*
+ 	 * Not bzero(): bzero uses dc zva (osfmk/arm64/bzero.s), and dc zva is not permitted on
+ 	 * I/O mapped memory - the arena comes from ml_io_map, so it faults (unaligned kernel data
+@@ -433,6 +473,7 @@ SweetAdrenoUserClient::gemNew(struct sweet_msm_gem_new *r)
+ 				struct sweet_gem *g = &fGems[i];
+ 				bzero(g, sizeof(*g));
+ 				g->md = buf;
++				g->buf = pa == 0 ? OSDynamicCast(IOBufferMemoryDescriptor, buf) : NULL;
+ 				g->kva = kva;
+ 				g->pa = pa;
+ 				g->size = size;
+@@ -446,9 +487,15 @@ SweetAdrenoUserClient::gemNew(struct sweet_msm_gem_new *r)
+ 			}
+ 		}
+ 	}
++	if (ret != kIOReturnSuccess && pa == 0) {
++		gAdrenoVmBytes -= size;
++	}
+ 	IOLockUnlock(gAdrenoLock);
+ 	if (ret != kIOReturnSuccess) {
+ 		buf->release();
++		if (pa != 0) {
++			sweet_gpu_free_pages(pa, size);
++		}
+ 	}
+ 	return ret;
+ }
+@@ -510,6 +557,37 @@ SweetAdrenoUserClient::gemInfo(struct sweet_msm_gem_info *r)
+ 	return ret;
+ }
+ 
++/*
++ * Clean+invalidate [off, off+len) of a BO through the linear map. Arena BOs are one physical
++ * run; ordinary-memory and surface BOs are walked segment by segment (the pages are not
++ * contiguous). flush_dcache64() works by physical address, so it reaches every alias.
++ */
++static void
++gem_flush(struct sweet_gem *g, uint64_t off, uint64_t len)
++{
++	if (len == 0 || off >= g->size) {
++		return;
++	}
++	if (len > g->size - off) {
++		len = g->size - off;
++	}
++	if (g->pa != 0) {
++		flush_dcache64((addr64_t)(g->pa + off), (unsigned)len, TRUE);
++		return;
++	}
++	while (len > 0) {
++		IOByteCount seg = 0;
++		addr64_t pa = g->md->getPhysicalSegment(off, &seg, kIOMemoryMapperNone);
++		if (pa == 0 || seg == 0) {
++			return;
++		}
++		uint64_t n = seg < len ? seg : len;
++		flush_dcache64(pa, (unsigned)n, TRUE);
++		off += n;
++		len -= n;
++	}
++}
++
+ IOReturn
+ SweetAdrenoUserClient::cpuPrep(struct sweet_msm_gem_cpu_prep *r)
+ {
+@@ -527,6 +605,8 @@ SweetAdrenoUserClient::cpuPrep(struct sweet_msm_gem_cpu_prep *r)
+ 			}
+ 			if (!waitFence(f, ns)) {
+ 				ret = kIOReturnTimeout;
++			} else if (g->pa == 0) {
++				gem_flush(g, 0, g->size);       /* cacheable memory: drop lines the GPU overwrote */
+ 			}
+ 		} else if (g->lastFence != 0 && !sweet_gpu_fence_done((r->op & SWEET_MSM_PREP_WRITE) ? g->lastFence : g->lastWrite)) {
+ 			ret = kIOReturnBusy;
+@@ -656,10 +736,7 @@ SweetAdrenoUserClient::submit(struct sweet_msm_gem_submit *r)
+ 	 * does that by physical address, which is why it works for a mapping we do not own.
+ 	 */
+ 	for (uint32_t i = 0; i < r->nr_bos; i++) {
+-		struct sweet_gem *g = objs[i];
+-		if (g->pa != 0 && g->size != 0) {
+-			flush_dcache64((addr64_t)g->pa, (unsigned)g->size, TRUE);
+-		}
++		gem_flush(objs[i], 0, objs[i]->size);
+ 	}
+ 	/* What the CP is about to read, through the uncached alias. */
+ 	{
+@@ -826,7 +903,11 @@ SweetAdrenoUserClient::boSync(struct sweet_gpu_bo_sync *r)
+ 			ret = kIOReturnBadArgument;
+ 		} else {
+ 			uint64_t len = r->size ? r->size : g->size - r->offset;
+-			sweet_gpu_cache_sync(g->kva + r->offset, (size_t)len);
++			if (g->pa != 0) {
++				sweet_gpu_cache_sync(g->kva + r->offset, (size_t)len);   /* uncached arena alias */
++			} else {
++				gem_flush(g, r->offset, len);
++			}
+ 			ret = kIOReturnSuccess;
+ 		}
+ 	}
