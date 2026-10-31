@@ -251,6 +251,12 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   either way); (3) if the hang is the dual-format aliasing, import 554 as the SAME pipe format as 550 (one layout).
   Until then, the shipping state is the CPU-drawn UI (boot_a = 0177r-gpu-nometal); the last Metal state without
   hangs is the 0185/0186 library (2-plane import for 550/551 only), which draws the UI but leaves stale regions.
+- **0188 + 554 mapping (next test):** `0188-fajita-gpu-hang-find-address.patch`: sweet_gpu_hang_dump() returns cb1's
+  FAR on a translation fault; waitFenceCall then runs `findAddress()`: logs `SWEET GPU FIND:` - BOs whose iova range
+  holds the low 32 bits (or with bit 31 set), and up to 8 (lo, hi) dword pairs in any BO with hi == FAR>>32 and lo
+  within 16 MiB of FAR's low word, with 16 dwords of context. CI `41253456836` -> `xnu/out-0188` SHA256
+  `cdee3fa2...`; image `shim/out/shim-boot-0188-metal.img`. Library: `chlorophyll-xr10-as-10bit.patch` now maps
+  554/555 (BGR10_XR) to PIPE_FORMAT_B10G10R10X2_UNORM; libbgair md5 `8f95773d5f0b...` (keeps the import logging).
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
