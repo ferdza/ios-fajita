@@ -25,6 +25,10 @@ SCRIPT = r'''#!/sbin/sh
 FD=$2
 ZIP=$3
 T0=$(date +%s)
+# some OrangeFox sessions have only /dev/block/bootdevice/by-name
+if [ -z "$DEVDIR" ]; then
+	for d in /dev/block/by-name /dev/block/bootdevice/by-name; do [ -e "$d/userdata" ] && DEVDIR=$d && break; done
+fi
 DEVDIR=${DEVDIR:-/dev/block/by-name}
 SYSBLK=${SYSBLK:-/sys/class/block}
 ui() { echo "ui_print [fajita] $*" >&$FD; }
