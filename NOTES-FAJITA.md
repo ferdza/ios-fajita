@@ -164,6 +164,16 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   550/551 on the display surface (format not logged - add it to that message next time the lib is rebuilt).
   Next try: **`shim/out/shim-boot-0181-metal-a160.img`** (ARENA_MIB=160, 187 MB, fastboot boot only; kernel
   max is 256 MiB and IO_MAP_SIZE 256 MiB), booted 17:28 UTC.
+- **160 MiB arena image (187 MB) hung at the fastboot logo** (kernel never ran: ring unchanged). ABL/shim limit
+  somewhere between 86 MB (worked) and 187 MB. Dropped in favour of option 2.
+- **0182 = option 2: GPU BOs in ordinary memory.** Key fact: SweetSurface allocates IOSurfaces with
+  `IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut | kIOMemoryKernelUserShared, size,
+  page_size)` and the GPU already renders into them via SURFACE_BO - those pages are valid; only contiguous
+  allocations (kmem_alloc_contig / contiguous IOBMD) produced the below-gPhysBase pages that panic. GEM_NEW now uses
+  the arena first, then that allocation (cap 768 MiB, `gAdrenoVmBytes`), logs `GEM_NEW N bytes from ordinary memory`.
+  `gem_flush()` cleans+invalidates any BO via physical segments: used for every BO at submit (surfaces were never
+  cleaned before), after CPU_PREP waits for cacheable BOs, and in BO_SYNC (was a no-op dsb). gemNew's failure path
+  now also frees arena pages. CI `41227113561` -> `xnu/out-0182`; image `shim/out/shim-boot-0182-metal.img` (40 MiB).
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
