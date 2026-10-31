@@ -185,6 +185,17 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   patched copy (`-I $BERG/gpu/freedreno-sweet` for its relative include). CI `41229013405` -> `xnu/out-0183`
   SHA256 `2be7c335...`; image `shim/out/shim-boot-0183-metal.img`. libdrm md5 `5991d09b70ec...` needs the sudo
   install + reflash before testing.
+- **0183 Metal boot (19:12 UTC, `logs/sweetlog-1031-0183.txt`): NO PANIC; lock screen drawn by the GPU** (user:
+  logo, fade, logo again; after power-button off/on the lock screen showed but repeated 1-2 frames; after a
+  second lock the screen stayed black and would not wake). 46 submits, 0 hangs, 8 ordinary-memory BOs (30 MiB).
+  Cause: **GPU VA exhaustion** - `va free table full` 376x (32-slot free list, no merging: once full every freed
+  range was lost), then 4218x `no room for 13893632 bytes in the client range` -> SURFACE_BO ENOMEM (error -12)
+  on IOSurface 2/3 (the screen buffers) -> nothing to render into -> backboardd SIGSEGV (far 0x14/0x18) 7x in a
+  loop -> display never comes back. **0184**: merge on give + 512 slots; host test `tools/tests/gpu-va-test.c`
+  (300k ops, 600 MiB live, no overlap, merges back to one extent). CI `41240629526` -> `xnu/out-0184` SHA256
+  `3769c6dc...`; image `shim/out/shim-boot-0184-metal.img` (no root change needed).
+  Smaller, still open: 108 `arena ... do not fit` (fallback to ordinary memory works), IOSurface 6 with a row
+  pitch not a multiple of 64 (refused by freedreno), 4 BOs "still in use by the GPU; leaked".
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
