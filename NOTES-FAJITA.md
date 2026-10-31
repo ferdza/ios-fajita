@@ -196,6 +196,13 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   `3769c6dc...`; image `shim/out/shim-boot-0184-metal.img` (no root change needed).
   Smaller, still open: 108 `arena ... do not fit` (fallback to ordinary memory works), IOSurface 6 with a row
   pitch not a multiple of 64 (refused by freedreno), 4 BOs "still in use by the GPU; leaked".
+- **0184 Metal boot (20:56 UTC, `logs/sweetlog-1031-0184.txt`): same symptom.** 0 `va free table full` (0184 works)
+  but 725 `no room for 13893632 bytes`: the first one after 73 SURFACE_BO calls (73 x 14 MB = 1 GiB). surfaceBo()
+  made a new GEM + 14 MB GPU mapping on every call for the same surface, although the client treats it as
+  idempotent. **0185**: return the client's existing BO for that surface. CI `41242229068` -> `xnu/out-0185`
+  SHA256 `10f5f34a...`; image `shim/out/shim-boot-0185-metal.img`.
+  Also one real hang (fence 64): SMMU cb1 FSR 0x402 **FAR 0xf00**, FSYNR0 0x11 (write) - GPU wrote near address 0,
+  i.e. a draw with an unbound/zero-iova target, most likely fallout of the refused surfaces. Recheck after 0185.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
