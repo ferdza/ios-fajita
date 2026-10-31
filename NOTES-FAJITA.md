@@ -222,6 +222,16 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   waits (IOSleep 1 ms, max 50 ms) until that fence is done before present(), skipped for fence 0 / lost GPU, and
   logs `SWEET FB: N presents, W waited for the GPU, T timed out` every 100 presents (W > 0 confirms the
   hypothesis). CI `41245130528` -> `xnu/out-0187` SHA256 `b8e64e5a...`; image `shim/out/shim-boot-0187-metal.img`.
+- **0187 boot (21:53 UTC, `logs/sweetlog-1031-0187.txt`): still old frames, but this boot also HUNG** at fence 63
+  (submit of 5248 dwords; SMMU cb1 FSR 0x402 FAR 0x8f7ba000 FSYNR0 0x3 = read of an unmapped page), GPU marked lost
+  (`rwa_device_open: there is no GPU here` 17x). 0185/0186 had no hang and still showed old frames, so the hang is
+  a separate, open bug. 0187's counter is contaminated by the hang (9 waits, 9 timeouts, all after it).
+  **Better explanation for the old frames:** in every Metal boot backboardd imports display surfaces 2/3 as
+  textures ~530x each and gets refused (`planes 2`), because chlorophyll-2plane-colour only allowed 550/551 on
+  2-plane surfaces. QuartzCore copies the undamaged area from the previous frame; refused -> those areas keep the
+  buffer's content from two swaps ago. **Fix (userspace):** chlorophyll-2plane-colour now accepts any 4-byte format on
+  the colour plane and its refusal names the MTLPixelFormat. libbgair md5 `7c0ac3ea803f...` - needs the sudo install
+  + reflash; test kernel stays `shim/out/shim-boot-0187-metal.img`.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
