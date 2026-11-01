@@ -1,0 +1,58 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index fb46169..b15d2f7 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -2009,11 +2009,11 @@ sweet_gpu_hang_ibs(uint64_t *ib1, uint64_t *ib2)
+ 	*ib2 = gpu_hang_ib2;
+ }
+ 
+-/* Returns the faulting address of context bank 1 (the GPU's) when it dumped now, else 0. */
++/* When it dumped now: context bank 1's faulting address, or 1 if the SMMU saw no fault. Else 0. */
+ uint64_t
+ sweet_gpu_hang_dump(const char *why)
+ {
+-	uint64_t far1 = 0;
++	uint64_t far1 = 1;
+ 	static uint32_t dumped;
+ 	vm_offset_t c = gpu_core;
+ 
+@@ -2054,7 +2054,7 @@ sweet_gpu_hang_dump(const char *why)
+ 	}
+ 	if (gpu_smmu == 0) {
+ 		printf("SWEET GPU HANG: smmu not mapped\n");
+-		return 0;
++		return 1;
+ 	}
+ 	printf("SWEET GPU HANG: smmu sGFSR %#x\n", gpu_rd_quiet(gpu_smmu, GPU_SMMU_SGFSR));
+ 	for (unsigned cb = 0; cb < 2; cb++) {
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index 6ee4013..ac0cb66 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -862,6 +862,9 @@ SweetAdrenoUserClient::findAddress(uint64_t far)
+ 	uint32_t hi = (uint32_t)(far >> 32), lo = (uint32_t)far;
+ 	unsigned hits = 0;
+ 
++	if (far == 1) {
++		goto ibs;
++	}
+ 	IOLog("SWEET GPU FIND: looking for %#llx (hi %#x lo %#x) in every client's BOs\n", far, hi, lo);
+ 	for (unsigned c = 0; c < CLIENT_LIST_MAX; c++) {
+ 		SweetAdrenoUserClient *uc = gClientList[c];
+@@ -903,6 +906,7 @@ SweetAdrenoUserClient::findAddress(uint64_t far)
+ 		}
+ 	}
+ 	IOLog("SWEET GPU FIND: %u pair(s) found\n", hits);
++ibs:
+ 	uint64_t ib1, ib2;
+ 	sweet_gpu_hang_ibs(&ib1, &ib2);
+ 	dump_dwords("ib1", ib1);
+@@ -928,7 +932,7 @@ SweetAdrenoUserClient::waitFenceCall(struct sweet_msm_wait_fence *r)
+ 		if (ret == kIOReturnTimeout) {
+ 			uint64_t far = sweet_gpu_hang_dump("wait fence");
+ 			if (far != 0) {
+-				findAddress(far);
++				findAddress(far);       /* far == 1: no SMMU fault, only the IB dumps say anything */
+ 			}
+ 		}
+ 		/*
