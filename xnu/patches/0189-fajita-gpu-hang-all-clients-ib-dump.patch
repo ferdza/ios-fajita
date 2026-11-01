@@ -1,0 +1,229 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 206c05e..fb46169 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1999,6 +1999,16 @@ sweet_gpu_report(const char *why)
+  * faulted, once per fence. Only reads, except the SQE stat index (Linux's a6xx crash dump
+  * does the same); nothing is reset or cleared, so a second dump shows the same state.
+  */
++static uint64_t gpu_hang_ib1, gpu_hang_ib2;
++
++/* Where the CP was when sweet_gpu_hang_dump() last dumped (for the client's IB dump). */
++void
++sweet_gpu_hang_ibs(uint64_t *ib1, uint64_t *ib2)
++{
++	*ib1 = gpu_hang_ib1;
++	*ib2 = gpu_hang_ib2;
++}
++
+ /* Returns the faulting address of context bank 1 (the GPU's) when it dumped now, else 0. */
+ uint64_t
+ sweet_gpu_hang_dump(const char *why)
+@@ -2025,6 +2035,8 @@ sweet_gpu_hang_dump(const char *why)
+ 	printf("SWEET GPU HANG: cp_status1 %#x hw_fault %#x cp_irq %#x protect %#x\n",
+ 	    gpu_cp_rd(c, A6XX_CP_STATUS_1), gpu_cp_rd(c, A6XX_CP_HW_FAULT),
+ 	    gpu_cp_rd(c, A6XX_CP_INTERRUPT_STATUS), gpu_cp_rd(c, A6XX_CP_PROTECT_STATUS));
++	gpu_hang_ib1 = (uint64_t)gpu_cp_rd(c, A6XX_CP_IB1_BASE + 1) << 32 | gpu_cp_rd(c, A6XX_CP_IB1_BASE);
++	gpu_hang_ib2 = (uint64_t)gpu_cp_rd(c, A6XX_CP_IB2_BASE + 1) << 32 | gpu_cp_rd(c, A6XX_CP_IB2_BASE);
+ 	printf("SWEET GPU HANG: ib1 %#llx rem %u dwords, ib2 %#llx rem %u dwords\n",
+ 	    (uint64_t)gpu_cp_rd(c, A6XX_CP_IB1_BASE + 1) << 32 | gpu_cp_rd(c, A6XX_CP_IB1_BASE),
+ 	    gpu_cp_rd(c, A6XX_CP_IB1_REM_SIZE),
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index 7cbbc59..0ac8632 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -56,6 +56,7 @@ uint32_t sweet_gpu_fence_last(void);
+ void sweet_gpu_mark_lost(void);
+ void sweet_gpu_report(const char *why);
+ uint64_t sweet_gpu_hang_dump(const char *why);
++void sweet_gpu_hang_ibs(uint64_t *ib1, uint64_t *ib2);
+ bool     sweet_gpu_alloc_pages(uint64_t size, uint64_t *pa, void **kva);
+ void     sweet_gpu_free_pages(uint64_t pa, uint64_t size);
+ /* osfmk/arm64/caches_asm.s: clean the dcache for a physical range via the linear map. */
+@@ -76,6 +77,9 @@ void SweetAdrenoPublish(void);
+ 
+ static IOLock *gAdrenoLock;
+ static uint32_t gAdrenoClients;
++#define CLIENT_LIST_MAX         32
++class SweetAdrenoUserClient;
++static SweetAdrenoUserClient *gClientList[CLIENT_LIST_MAX];   /* for hang diagnostics, under gAdrenoLock */
+ static uint64_t gAdrenoVmBytes;         /* GEM_NEW BOs in ordinary memory, under gAdrenoLock */
+ 
+ struct sweet_gem {
+@@ -122,6 +126,7 @@ class SweetAdrenoUserClient : public IOUserClient {
+ 	IOReturn waitFenceCall(struct sweet_msm_wait_fence *r);
+ 	IOReturn surfaceBo(struct sweet_gpu_surface_bo *r);
+ 	void findAddress(uint64_t far);
++	struct sweet_gem *gemTable(void) { return fGems; }
+ 	IOReturn boSync(struct sweet_gpu_bo_sync *r);
+ 
+ public:
+@@ -194,12 +199,32 @@ SweetAdrenoUserClient::initWithTask(task_t owningTask, void *securityID, UInt32
+ 	}
+ 	fTask = owningTask;
+ 	fGems = (struct sweet_gem *)IOMallocZeroData(sizeof(struct sweet_gem) * GEM_MAX);
+-	return fGems != NULL;
++	if (fGems == NULL) {
++		return false;
++	}
++	IOLockLock(gAdrenoLock);
++	for (unsigned i = 0; i < CLIENT_LIST_MAX; i++) {
++		if (gClientList[i] == NULL) {
++			gClientList[i] = this;
++			break;
++		}
++	}
++	IOLockUnlock(gAdrenoLock);
++	return true;
+ }
+ 
+ void
+ SweetAdrenoUserClient::free()
+ {
++	if (gAdrenoLock != NULL) {
++		IOLockLock(gAdrenoLock);
++		for (unsigned i = 0; i < CLIENT_LIST_MAX; i++) {
++			if (gClientList[i] == this) {
++				gClientList[i] = NULL;
++			}
++		}
++		IOLockUnlock(gAdrenoLock);
++	}
+ 	if (fGems != NULL) {
+ 		IOFreeData(fGems, sizeof(struct sweet_gem) * GEM_MAX);
+ 		fGems = NULL;
+@@ -780,48 +805,108 @@ out:
+  * its high word next to a nearby low word, and which BO the low 32 bits would land in.
+  * The GPU computed the address from memory somewhere; this names the buffer and offset.
+  */
++/* The BO (any client) whose GPU range holds va, or NULL. Lock held. */
++static struct sweet_gem *
++gem_at(uint64_t va, unsigned *client, uint32_t *handle)
++{
++	for (unsigned c = 0; c < CLIENT_LIST_MAX; c++) {
++		SweetAdrenoUserClient *uc = gClientList[c];
++		if (uc == NULL || uc->gemTable() == NULL) {
++			continue;
++		}
++		for (uint32_t i = 0; i < GEM_MAX; i++) {
++			struct sweet_gem *g = &uc->gemTable()[i];
++			if (g->md != NULL && g->iova != IOVA_UNSET && g->iova <= va && va < g->iova + g->size) {
++				*client = c;
++				*handle = i + 1;
++				return g;
++			}
++		}
++	}
++	return NULL;
++}
++
++/* Up to 256 dwords at va, 8 a line, from whichever client's BO holds it. Lock held. */
++static void
++dump_dwords(const char *what, uint64_t va)
++{
++	unsigned c;
++	uint32_t h;
++	struct sweet_gem *g = va != 0 ? gem_at(va, &c, &h) : NULL;
++
++	if (g == NULL || g->kva == NULL) {
++		IOLog("SWEET GPU DUMP %s %#llx: in no mapped BO\n", what, va);
++		return;
++	}
++	uint64_t off = va - g->iova, n = (g->size - off) / 4;
++	if (n > 256) {
++		n = 256;
++	}
++	volatile uint32_t *p = (volatile uint32_t *)(void *)(g->kva + off);
++	IOLog("SWEET GPU DUMP %s %#llx: client %u bo %u iova %#llx size %llu, %llu dwords\n", what, va, c, h, g->iova, g->size, n);
++	for (uint64_t j = 0; j < n; j += 8) {
++		IOLog("SWEET GPU DUMP %s +%#05llx: %08x %08x %08x %08x %08x %08x %08x %08x\n", what, j * 4,
++		    p[j], j + 1 < n ? p[j + 1] : 0, j + 2 < n ? p[j + 2] : 0, j + 3 < n ? p[j + 3] : 0,
++		    j + 4 < n ? p[j + 4] : 0, j + 5 < n ? p[j + 5] : 0, j + 6 < n ? p[j + 6] : 0, j + 7 < n ? p[j + 7] : 0);
++	}
++}
++
++/*
++ * Hang diagnostics (lock held), across every client: the BO the faulting address's low 32 bits
++ * would land in, every (lo, hi) dword pair with lo within 16 MiB of it and hi matching in its
++ * low 17 bits (a6xx descriptors keep other fields above BASE_HI), and the IB1/IB2 the CP was in.
++ */
+ void
+ SweetAdrenoUserClient::findAddress(uint64_t far)
+ {
+ 	uint32_t hi = (uint32_t)(far >> 32), lo = (uint32_t)far;
+ 	unsigned hits = 0;
+ 
+-	IOLog("SWEET GPU FIND: looking for %#llx (hi %#x lo %#x) in this client's BOs\n", far, hi, lo);
+-	for (uint32_t i = 0; i < GEM_MAX; i++) {
+-		struct sweet_gem *g = &fGems[i];
+-		if (g->md == NULL) {
++	IOLog("SWEET GPU FIND: looking for %#llx (hi %#x lo %#x) in every client's BOs\n", far, hi, lo);
++	for (unsigned c = 0; c < CLIENT_LIST_MAX; c++) {
++		SweetAdrenoUserClient *uc = gClientList[c];
++		if (uc == NULL || uc->fGems == NULL) {
+ 			continue;
+ 		}
+-		bool contains = (g->iova <= lo && lo < g->iova + g->size) ||
+-		    (g->iova <= (lo | 0x80000000u) && (lo | 0x80000000u) < g->iova + g->size);
+-		if (contains) {
+-			IOLog("SWEET GPU FIND: lo %#x (or %#x) falls in bo %u iova %#llx size %llu%s\n", lo, lo | 0x80000000u,
+-			    i + 1, g->iova, g->size, g->surface ? " (surface)" : "");
+-		}
+-		if (g->kva == NULL || hi == 0) {
+-			continue;
+-		}
+-		volatile uint32_t *p = (volatile uint32_t *)(void *)g->kva;
+-		uint64_t n = g->size / 4;
+-		for (uint64_t k = 1; k < n && hits < 8; k++) {
+-			if (p[k] != hi) {
++		for (uint32_t i = 0; i < GEM_MAX; i++) {
++			struct sweet_gem *g = &uc->fGems[i];
++			if (g->md == NULL) {
+ 				continue;
+ 			}
+-			uint32_t d = p[k - 1] > lo ? p[k - 1] - lo : lo - p[k - 1];
+-			if (d > 0x01000000u) {
++			if (g->iova <= lo && lo < g->iova + g->size) {
++				IOLog("SWEET GPU FIND: lo %#x falls in client %u bo %u iova %#llx size %llu%s\n", lo, c, i + 1,
++				    g->iova, g->size, g->surface ? " (surface)" : "");
++			}
++			if (g->kva == NULL || hi == 0) {
+ 				continue;
+ 			}
+-			hits++;
+-			uint64_t a = k >= 8 ? k - 8 : 0, b = k + 8 < n ? k + 8 : n - 1;
+-			IOLog("SWEET GPU FIND: bo %u iova %#llx size %llu%s: pair at +%#llx (iova %#llx) = %#x %#x\n", i + 1, g->iova,
+-			    g->size, g->surface ? " (surface)" : "", (k - 1) * 4, g->iova + (k - 1) * 4, p[k - 1], p[k]);
+-			for (uint64_t j = a; j <= b; j += 4) {
+-				IOLog("SWEET GPU FIND:   +%#06llx: %#010x %#010x %#010x %#010x\n", j * 4, p[j],
+-				    j + 1 <= b ? p[j + 1] : 0, j + 2 <= b ? p[j + 2] : 0, j + 3 <= b ? p[j + 3] : 0);
++			volatile uint32_t *p = (volatile uint32_t *)(void *)g->kva;
++			uint64_t n = g->size / 4;
++			for (uint64_t k = 1; k < n && hits < 8; k++) {
++				if ((p[k] & 0x1ffffu) != hi) {
++					continue;
++				}
++				uint32_t d = p[k - 1] > lo ? p[k - 1] - lo : lo - p[k - 1];
++				if (d > 0x01000000u) {
++					continue;
++				}
++				hits++;
++				uint64_t a = k >= 8 ? k - 8 : 0, b = k + 8 < n ? k + 8 : n - 1;
++				IOLog("SWEET GPU FIND: client %u bo %u iova %#llx size %llu%s: pair at +%#llx (iova %#llx) = %#x %#x\n",
++				    c, i + 1, g->iova, g->size, g->surface ? " (surface)" : "", (k - 1) * 4, g->iova + (k - 1) * 4,
++				    p[k - 1], p[k]);
++				for (uint64_t j = a; j <= b; j += 4) {
++					IOLog("SWEET GPU FIND:   +%#06llx: %#010x %#010x %#010x %#010x\n", j * 4, p[j],
++					    j + 1 <= b ? p[j + 1] : 0, j + 2 <= b ? p[j + 2] : 0, j + 3 <= b ? p[j + 3] : 0);
++				}
+ 			}
+ 		}
+ 	}
+ 	IOLog("SWEET GPU FIND: %u pair(s) found\n", hits);
++	uint64_t ib1, ib2;
++	sweet_gpu_hang_ibs(&ib1, &ib2);
++	dump_dwords("ib1", ib1);
++	dump_dwords("ib2", ib2);
+ }
+ 
+ IOReturn
