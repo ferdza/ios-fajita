@@ -263,6 +263,19 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   (backboardd 0x804..., SpringBoard 0x87e...). **0189**: global client list; search every client with hi masked to
   a6xx's 17-bit BASE_HI; dump 256 dwords of the IB1 and IB2 the CP was in (`SWEET GPU DUMP ib1/ib2`) for offline
   PM4 decoding. CI `41258042739` -> `xnu/out-0189` SHA256 `50d76f81...`; image `shim/out/shim-boot-0189-metal.img`.
+- **2026-11-01: borrowed from tre4surehunter9/ios-fajita (MIT, independent lineage built on ios-flame; clone in
+  `~/Downloads/ext-tre4sure/repo`, read only).** They reach the home screen through Metal with Turnip + metal2vulkan
+  (their GPU-PLAN.md; "very slow"). Their stack differs (NativeAdreno ABI, Turnip, Rust bridge), so no wholesale
+  port; three targeted fixes:
+  - **0191 `pmap_sync_page_attributes_phys`: `ptoa(pp)` instead of `pp << PAGE_SHIFT`** (ppnum_t is 32-bit). Every
+    "page below gPhysBase" panic in these notes (console80 0x52a0000, 0x24114000, 0182's 0xd1d80000) was a page above
+    4 GiB with bit 32 dropped on a cache-mode change (pmap_set_cache_attributes -> pmap_sync_wimg -> here). The GPU
+    arena workaround was never needed for that reason. Disassembly of 0192 shows `ubfiz x0, x0, #14, #32`.
+  - **0192: UBWC registers for SDM845** (RB/TPL1/SP_NC_MODE_CNTL 0x4, UCHE_MODE_CNTL 0x400000, RBBM_NC_MODE_CNTL 0;
+    Mesa's A630 entry assumes hbb 15 and compresses 2D render targets; our kernel never programmed them) **and
+    PC_CCU_INVALIDATE_DEPTH/COLOR before the IBs of every submit** (msm's a6xx_submit; Mesa relies on it).
+  - CI `41264272500` (0190-0192) -> `xnu/out-0192` SHA256 `1bb0d43d...`; image `shim/out/shim-boot-0192-metal.img`.
+    Test without reflash: the root still has the 554 import that hung every time.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
