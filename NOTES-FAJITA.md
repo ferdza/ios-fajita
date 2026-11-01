@@ -257,6 +257,12 @@ The earlier `sweet_ufs.c` "bad read" theory is **withdrawn**; no evidence of a d
   within 16 MiB of FAR's low word, with 16 dwords of context. CI `41253456836` -> `xnu/out-0188` SHA256
   `cdee3fa2...`; image `shim/out/shim-boot-0188-metal.img`. Library: `chlorophyll-xr10-as-10bit.patch` now maps
   554/555 (BGR10_XR) to PIPE_FORMAT_B10G10R10X2_UNORM; libbgair md5 `8f95773d5f0b...` (keeps the import logging).
+- **0188 boot (00:30 UTC 11-01, `logs/sweetlog-1101-0188.txt`): still stuck on the logo, but later:** fences 1-12
+  retire (several after 554 imports), job 13 (backboardd, ib 0x80472000) hangs; FAR 0x44818bb0b900 (garbage again).
+  FIND searched only the waiting client and matched hi exactly: 0 pairs. Two GPU clients share the one GPU VA space
+  (backboardd 0x804..., SpringBoard 0x87e...). **0189**: global client list; search every client with hi masked to
+  a6xx's 17-bit BASE_HI; dump 256 dwords of the IB1 and IB2 the CP was in (`SWEET GPU DUMP ib1/ib2`) for offline
+  PM4 decoding. CI `41258042739` -> `xnu/out-0189` SHA256 `50d76f81...`; image `shim/out/shim-boot-0189-metal.img`.
 - **GPU / Metal restart on this host (2026-10-31).** `/home/edi194/...` paths in old notes and tools
   belong to the **upstream author's machine** (this repo is a fork); none of those files exist here.
   Tools now default to `$HOME` paths (SDK `~/theos/sdks/iPhoneOS16.5.sdk`, refs `~/ref`, outputs
