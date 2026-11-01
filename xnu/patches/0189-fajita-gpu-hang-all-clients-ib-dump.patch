@@ -29,7 +29,7 @@ index 206c05e..fb46169 100644
  	    (uint64_t)gpu_cp_rd(c, A6XX_CP_IB1_BASE + 1) << 32 | gpu_cp_rd(c, A6XX_CP_IB1_BASE),
  	    gpu_cp_rd(c, A6XX_CP_IB1_REM_SIZE),
 diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
-index 7cbbc59..0ac8632 100644
+index 7cbbc59..6ee4013 100644
 --- a/iokit/Kernel/arm/SweetAdreno.cpp
 +++ b/iokit/Kernel/arm/SweetAdreno.cpp
 @@ -56,6 +56,7 @@ uint32_t sweet_gpu_fence_last(void);
@@ -50,14 +50,14 @@ index 7cbbc59..0ac8632 100644
  static uint64_t gAdrenoVmBytes;         /* GEM_NEW BOs in ordinary memory, under gAdrenoLock */
  
  struct sweet_gem {
-@@ -122,6 +126,7 @@ class SweetAdrenoUserClient : public IOUserClient {
- 	IOReturn waitFenceCall(struct sweet_msm_wait_fence *r);
- 	IOReturn surfaceBo(struct sweet_gpu_surface_bo *r);
- 	void findAddress(uint64_t far);
-+	struct sweet_gem *gemTable(void) { return fGems; }
+@@ -125,6 +129,7 @@ class SweetAdrenoUserClient : public IOUserClient {
  	IOReturn boSync(struct sweet_gpu_bo_sync *r);
  
  public:
++	struct sweet_gem *gemTable(void) { return fGems; }   /* hang diagnostics */
+ 	bool initWithTask(task_t owningTask, void *securityID, UInt32 type) APPLE_KEXT_OVERRIDE;
+ 	void free() APPLE_KEXT_OVERRIDE;
+ 	IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
 @@ -194,12 +199,32 @@ SweetAdrenoUserClient::initWithTask(task_t owningTask, void *securityID, UInt32
  	}
  	fTask = owningTask;
