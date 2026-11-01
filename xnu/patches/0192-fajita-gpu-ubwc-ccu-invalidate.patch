@@ -1,0 +1,59 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index b15d2f7..7de6543 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -314,6 +314,11 @@ extern void delay(unsigned);
+ #define A6XX_GRAS_ADDR_MODE_CNTL 0x8601u
+ #define A6XX_RB_ADDR_MODE_CNTL 0x8e05u
+ #define A6XX_PC_DBG_ECO_CNTL   0x9e00u
++#define A6XX_RB_NC_MODE_CNTL   0x8e08u
++#define A6XX_TPL1_NC_MODE_CNTL 0xb604u
++#define A6XX_SP_NC_MODE_CNTL   0xae02u
++#define A6XX_UCHE_MODE_CNTL    0x0e01u
++#define A6XX_RBBM_NC_MODE_CNTL 0x0534u
+ #define A6XX_PC_ADDR_MODE_CNTL 0x9e01u
+ #define A6XX_VPC_ADDR_MODE_CNTL 0x9601u
+ #define A6XX_VFD_ADDR_MODE_CNTL 0xa601u
+@@ -330,6 +335,8 @@ extern void delay(unsigned);
+ #define GPU_CP_EVENT_WRITE     70u
+ #define GPU_CP_SET_SECURE_MODE 102u
+ #define GPU_CP_CACHE_FLUSH_TS  4u
++#define GPU_PC_CCU_INVALIDATE_DEPTH 0x18u
++#define GPU_PC_CCU_INVALIDATE_COLOR 0x19u
+ #define GPU_CP_EVENT_WRITE_IRQ 0x80000000u
+ #define A6XX_RBBM_INT_0_STATUS  0x0201u
+ #define A6XX_RBBM_INT_CLEAR_CMD 0x0037u
+@@ -1270,6 +1277,17 @@ gpu_cp_hw_init(vm_offset_t core)
+ 	gpu_cp_wr(core, A6XX_CP_AHB_CNTL, 1);
+ 	gpu_cp_wr(core, A6XX_RBBM_INTERFACE_HANG_INT_CNTL, (1u << 30) | 0x1fffffu);
+ 	gpu_cp_wr(core, A6XX_UCHE_CLIENT_PF, (1u << 7) | 1u);
++	/*
++	 * UBWC as Linux's a6xx_set_ubwc_config with SDM845's entry (UBWC 2.0, highest bank bit 15 ->
++	 * hbb_lo 2, swizzle levels 2 and 3, no AMSBC/macrotile/min-access). Mesa's A630 entry assumes
++	 * exactly this and compresses its 2D render targets; left at reset, the GPU decoded them with
++	 * another layout. Values from tre4surehunter9/ios-fajita 0099 (MIT), offsets checked in a6xx.xml.
++	 */
++	gpu_cp_wr(core, A6XX_RB_NC_MODE_CNTL, 2u << 1);
++	gpu_cp_wr(core, A6XX_TPL1_NC_MODE_CNTL, 2u << 1);
++	gpu_cp_wr(core, A6XX_SP_NC_MODE_CNTL, 2u << 1);
++	gpu_cp_wr(core, A6XX_UCHE_MODE_CNTL, 2u << 21);
++	gpu_cp_wr(core, A6XX_RBBM_NC_MODE_CNTL, 0);
+ 	/* The ring and the SQE through context CB1; completion is polled (INT mask 0). */
+ 	gpu_cp_wr64(core, A6XX_CP_SQE_INSTR_BASE, GPU_VA_CP_SQE);
+ 	gpu_cp_wr64(core, A6XX_CP_RB_BASE, GPU_VA_CP_RING);
+@@ -1945,6 +1963,15 @@ sweet_gpu_submit(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned co
+ 	if (!gpu_live || ib_iova == NULL || ib_dwords == NULL || count == 0) {
+ 		return 0;
+ 	}
++	/*
++	 * As msm's a6xx_submit: invalidate the CCU's depth and colour caches first. Mesa relies on the
++	 * kernel for this between submissions; without it a render target read back as a texture can
++	 * come out of the colour cache stale. (tre4surehunter9/ios-fajita 0098, MIT.)
++	 */
++	gpu_ring_emit(gpu_blob + GPU_CP_RING, gpu_pkt7(GPU_CP_EVENT_WRITE, 1));
++	gpu_ring_emit(gpu_blob + GPU_CP_RING, GPU_PC_CCU_INVALIDATE_DEPTH);
++	gpu_ring_emit(gpu_blob + GPU_CP_RING, gpu_pkt7(GPU_CP_EVENT_WRITE, 1));
++	gpu_ring_emit(gpu_blob + GPU_CP_RING, GPU_PC_CCU_INVALIDATE_COLOR);
+ 	for (unsigned i = 0; i < count; i++) {
+ 		gpu_ring_emit(gpu_blob + GPU_CP_RING, gpu_pkt7(GPU_CP_INDIRECT_BUFFER_PFE, 3));
+ 		gpu_ring_emit(gpu_blob + GPU_CP_RING, (uint32_t)ib_iova[i]);
