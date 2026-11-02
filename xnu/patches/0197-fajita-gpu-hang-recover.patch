@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index d72ab58..f077ac8 100644
+index d72ab58..7ff4a83 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
 @@ -326,6 +326,13 @@ extern void delay(unsigned);
@@ -21,7 +21,7 @@ index d72ab58..f077ac8 100644
  static uint32_t gpu_last_fence;
  static vm_offset_t gpu_pt_blob;      /* where the page tables live */
 +static uint64_t gpu_gmem_pa;         /* GMU-memory blob PA, kept for a zap reload during recovery */
-+static bool gpu_recover_on;          /* boot-arg gpurecover=1: reset and re-init the GPU after a hang */
++static bool gpu_recover_on = true;   /* on by default; boot-arg gpurecover=0 disables the reset */
 +static unsigned gpu_recover_tries;   /* resets attempted this boot; a backstop against a reset loop */
 +#define GPU_RECOVER_MAX 32u          /* past this many resets the GPU is declared lost until reboot */
  
@@ -51,7 +51,7 @@ index d72ab58..f077ac8 100644
  }
  
 +/*
-+ * GPU hang recovery (EXPERIMENTAL; boot-arg gpurecover=1, default off).
++ * GPU hang recovery (EXPERIMENTAL; on by default, boot-arg gpurecover=0 disables).
 + *
 + * A wedged CP never retires its fence, so the submit path's ring-drain wait
 + * times out and - without this - that frame and every WAIT_FENCE behind it are
@@ -146,7 +146,7 @@ index d72ab58..f077ac8 100644
  
  	(void)PE_parse_boot_argn("adreno", &level, sizeof(level));
 +	{
-+		int rec = 0;	/* opt-in: GPU reset after a hang is experimental (see sweet_gpu_recover) */
++		int rec = 1;	/* on by default; gpurecover=0 disables the reset (see sweet_gpu_recover) */
 +		(void)PE_parse_boot_argn("gpurecover", &rec, sizeof(rec));
 +		gpu_recover_on = rec != 0;
 +	}
