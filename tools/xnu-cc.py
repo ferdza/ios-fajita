@@ -20,9 +20,15 @@ Env: XNU_CC_EXTRA   extra flags (e.g. "-DKPERF -DKPC" for config changes)
 import concurrent.futures as cf, os, re, shlex, subprocess, sys
 from collections import Counter
 
+# Default CI checkout root; overridden per-log by detect_ci_dxb() so this works
+# on any fork (ios-sweet, ios-fajita, ...) without editing the source.
 CI_DXB = '/Users/runner/work/ios-sweet/ios-sweet/dxb'
 CI_SDK_PLATFORM = re.compile(r'/Applications/Xcode[^ ]*?\.sdk/+System/Library/Frameworks/Kernel\.framework/Versions/A/PrivateHeaders/platform')
-CLANG = os.path.expanduser('~/swift/usr/bin/clang')
+# Apple-fork clang if installed (swiftlang on Linux, or Xcode on macOS), else a
+# system clang via $XNU_CC_CLANG / $PATH: good enough for -fsyntax-only and for
+# arm64 objects whose undefined symbols reveal link errors (plain arm64, no ptrauth).
+_SWIFT_CLANG = os.path.expanduser('~/swift/usr/bin/clang')
+CLANG = os.environ.get('XNU_CC_CLANG') or (_SWIFT_CLANG if os.path.exists(_SWIFT_CLANG) else 'clang')
 DROP = {'-c', '-g', '-MD', '-MMD'}
 DROP_WITH_ARG = {'-MF', '-MT', '-o', '-arch'}
 COMPONENTS = ('osfmk', 'bsd', 'iokit', 'libkern', 'pexpert', 'security', 'san', 'libsa')
@@ -119,8 +125,18 @@ def run(item, bt, cdirs):
     return src, p.returncode, p.stderr
 
 
+def detect_ci_dxb(log):
+    """The CI checkout root varies by fork (.../work/<repo>/<repo>/dxb). Pick the
+    most common one actually seen in this log so paths resolve without editing."""
+    pats = Counter(re.findall(r'/Users/runner/work/[^/ ]+/[^/ ]+/dxb', open(log, errors='replace').read()))
+    return pats.most_common(1)[0][0] if pats else CI_DXB
+
+
 def main():
+    global CI_DXB
     log, bt = sys.argv[1], os.path.abspath(sys.argv[2])
+    CI_DXB = detect_ci_dxb(log)
+    print(f'CI checkout root: {CI_DXB}   clang: {CLANG}', file=sys.stderr)
     per_file = '--per-file' in sys.argv
     filters = [a for a in sys.argv[3:] if a != '--per-file']
     cmds = commands(log)
