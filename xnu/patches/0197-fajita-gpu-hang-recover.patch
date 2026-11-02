@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
-index d72ab58..7ff4a83 100644
+index d72ab58..8eb56cc 100644
 --- a/bsd/dev/sweet_gpu.c
 +++ b/bsd/dev/sweet_gpu.c
 @@ -326,6 +326,13 @@ extern void delay(unsigned);
@@ -46,7 +46,7 @@ index d72ab58..7ff4a83 100644
  		return 0;
  	}
  	return gpu_cp_seq;
-@@ -2967,6 +2983,94 @@ gpu_hfi_send(const uint32_t *msg, unsigned n, const char *what)
+@@ -2967,6 +2983,105 @@ gpu_hfi_send(const uint32_t *msg, unsigned n, const char *what)
  	return (int)(ack_hdr & 0xffu);
  }
  
@@ -63,9 +63,11 @@ index d72ab58..7ff4a83 100644
 + *   1. halt the SQE and the VBIF so no in-flight GPU write lands after the reset
 + *   2. RBBM soft-reset the GPU core (the GMU and its clocks stay up: a CP hang
 + *      does not wedge the GMU, so the heavier GMU SYSRESET is not used)
-+ *   3. re-run the CP hardware init and CP_ME_INIT (as stage 7a)
-+ *   4. reload the zap shader to leave secure mode again (as stage 7c)
-+ *   5. advance the fence slot to the last submitted sequence so every waiter
++ *   3. re-vote the GX rail and SPTPRAC through the GMU (stage 5): the reset can
++ *      drop them, and the CP will not start on a core with no GX power
++ *   4. re-run the CP hardware init and CP_ME_INIT (as stage 7a)
++ *   5. reload the zap shader to leave secure mode again (as stage 7c)
++ *   6. advance the fence slot to the last submitted sequence so every waiter
 + *      unblocks; the lost work is declared complete and the client resubmits it
 + *
 + * Fails closed: any step that does not settle marks the GPU lost - no further
@@ -115,21 +117,30 @@ index d72ab58..7ff4a83 100644
 +	gpu_cp_wr(core, A6XX_RBBM_SW_RESET_CMD, 0);
 +	gpu_wait_ms(1);
 +
-+	/* 3. the CP comes back exactly as at boot. */
++	/* 3. the GX rail and SPTPRAC can drop with the reset; re-run stage 5 against the
++	 *    GMU (which stays up). Without this the CP comes up on a dead core - observed
++	 *    on device as CP_ME_INIT never draining (cp_status1 0x81104006, then GPU lost). */
++	if (!gpu_gx_rail_on(hfi_gmu) || !gpu_sptprac_on(hfi_gmu)) {
++		printf("SWEET GPU: recover (%s): GX rail/SPTPRAC did not come back, GPU lost\n", why);
++		gpu_lost = true;
++		return false;
++	}
++
++	/* 4. the CP comes back exactly as at boot (stage 7a). */
 +	if (!gpu_cp_hw_init(core) || !gpu_cp_start(core, g + GPU_CP_RING)) {
 +		printf("SWEET GPU: recover (%s): CP did not re-init, GPU lost\n", why);
 +		gpu_lost = true;
 +		return false;
 +	}
 +
-+	/* 4. the reset dropped the GPU back into secure mode; the zap shader leaves it. */
++	/* 5. the reset dropped the GPU back into secure mode; the zap shader leaves it (stage 7c). */
 +	if (!gpu_zap_load(g, gpu_gmem_pa)) {
 +		printf("SWEET GPU: recover (%s): zap reload failed, GPU lost\n", why);
 +		gpu_lost = true;
 +		return false;
 +	}
 +
-+	/* 5. retire the lost work: the CP writes rising sequences from here, and every
++	/* 6. retire the lost work: the CP writes rising sequences from here, and every
 +	 *    waiter on an already-submitted fence now sees it done and unblocks. */
 +	*(volatile uint32_t *)(g + GPU_CP_SCRATCH + GPU_CP_SCRATCH_FENCE) = gpu_cp_seq;
 +	__asm__ volatile("dsb sy" ::: "memory");
@@ -141,7 +152,7 @@ index d72ab58..7ff4a83 100644
  void
  sweet_gpu_probe(void)
  {
-@@ -2974,6 +3078,11 @@ sweet_gpu_probe(void)
+@@ -2974,6 +3089,11 @@ sweet_gpu_probe(void)
  	vm_offset_t gcc, cc, dbgc, misc, gmu, smmu, gpu, qf, db;
  
  	(void)PE_parse_boot_argn("adreno", &level, sizeof(level));
@@ -153,7 +164,7 @@ index d72ab58..7ff4a83 100644
  	if (level < 1) {
  		printf("SWEET GPU: probe off (adreno=1 enables it)\n");
  		return;
-@@ -3799,6 +3908,7 @@ gmu_only:
+@@ -3799,6 +3919,7 @@ gmu_only:
  									gpu_kept_up = true;
  									gpu_blob = g;
  									gpu_core = gpu;
