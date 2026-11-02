@@ -24,6 +24,9 @@ Point d'entrée de la doc du projet (iOS 16 + Metal/Adreno 630 sur OnePlus 6T).
 - **[gpu-reference-audit.md](gpu-reference-audit.md)** — comparaison de notre
   code avec les projets de référence, findings priorisés, ce qui est corrigé et
   ce qui reste.
+- **[gpu-multiring-design.md](gpu-multiring-design.md)** — design du chantier
+  long terme : soumission concurrente / multi-ring (étage logiciel sûr, puis
+  préemption HW optionnelle), avec le risque a630 documenté.
 
 ## Recherche
 
