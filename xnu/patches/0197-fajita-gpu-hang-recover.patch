@@ -1,0 +1,163 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index d72ab58..f077ac8 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -326,6 +326,13 @@ extern void delay(unsigned);
+ #define A6XX_TPL1_ADDR_MODE_CNTL 0xb601u
+ #define A6XX_HLSQ_ADDR_MODE_CNTL 0xbe05u
+ #define A6XX_VBIF_GATE_OFF_WRREQ_EN 0x302au
++/* GPU-core recovery registers (a6xx.xml / kernel a6xx.xml.h, dword indices like
++ * the rest of this block). a630's RBBM_SW_RESET_CMD is 0x043 - not the 0x073 of
++ * later parts - so the value is pinned to this generation on purpose. */
++#define A6XX_RBBM_SW_RESET_CMD  0x0043u   /* GPU-core soft reset; the GMU stays up */
++#define A6XX_VBIF_XIN_HALT_CTRL0 0x3080u  /* halt the VBIF AXI clients before the reset */
++#define A6XX_VBIF_XIN_HALT_CTRL1 0x3081u  /* reads back the halt acknowledge */
++#define A6XX_VBIF_XIN_HALT_MASK  0xfu     /* a630's four VBIF clients (msm GENMASK(3,0)) */
+ #define CP_RB_CNTL_VALUE       ((1u << 27) | (2u << 8) | 12u)
+ /* stage 7b: PM4 opcodes and the interrupt registers the submission touches */
+ #define A6XX_RBBM_STATUS        0x0210u   /* byte 0x840, the read that answers 0x1 */
+@@ -527,6 +534,10 @@ static vm_offset_t gpu_core;
+ static bool gpu_live;
+ static uint32_t gpu_last_fence;
+ static vm_offset_t gpu_pt_blob;      /* where the page tables live */
++static uint64_t gpu_gmem_pa;         /* GMU-memory blob PA, kept for a zap reload during recovery */
++static bool gpu_recover_on;          /* boot-arg gpurecover=1: reset and re-init the GPU after a hang */
++static unsigned gpu_recover_tries;   /* resets attempted this boot; a backstop against a reset loop */
++#define GPU_RECOVER_MAX 32u          /* past this many resets the GPU is declared lost until reboot */
+ 
+ /*
+  * Arena blocks. bgmtl-adddev runs several times per boot (launchd restarts it after each crash) and
+@@ -1964,6 +1975,8 @@ sweet_gpu_cache_sync(void *va, size_t len)
+ 	__asm__ volatile("dsb sy" ::: "memory");
+ }
+ 
++bool sweet_gpu_recover(const char *why);      /* defined below, before the bring-up */
++
+ /* One CP_INDIRECT_BUFFER per command buffer, then the CACHE_FLUSH_TS fence - Linux's
+  * a6xx_submit tail, which is what their submit path hands us. */
+ uint32_t
+@@ -1996,6 +2009,9 @@ sweet_gpu_submit(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned co
+ 	gpu_ring_flush(gpu_core, gpu_cp_wptr);
+ 
+ 	if (!gpu_ring_wait_idle(gpu_core, "submit")) {
++		/* The CP wedged mid-frame. Try to reset it so the client can resubmit;
++		 * without recovery this frame and every waiter behind it hang (the freeze). */
++		sweet_gpu_recover("submit drain");
+ 		return 0;
+ 	}
+ 	return gpu_cp_seq;
+@@ -2967,6 +2983,94 @@ gpu_hfi_send(const uint32_t *msg, unsigned n, const char *what)
+ 	return (int)(ack_hdr & 0xffu);
+ }
+ 
++/*
++ * GPU hang recovery (EXPERIMENTAL; boot-arg gpurecover=1, default off).
++ *
++ * A wedged CP never retires its fence, so the submit path's ring-drain wait
++ * times out and - without this - that frame and every WAIT_FENCE behind it are
++ * stuck until the user reboots (the "freeze"). This resets the GPU core and
++ * brings the CP back so the client resubmits.
++ *
++ * Modelled on msm's a6xx_recover and Snapintosh's adreno_recover, reduced to
++ * this single-ring, GMU-up port and adapted to a630:
++ *   1. halt the SQE and the VBIF so no in-flight GPU write lands after the reset
++ *   2. RBBM soft-reset the GPU core (the GMU and its clocks stay up: a CP hang
++ *      does not wedge the GMU, so the heavier GMU SYSRESET is not used)
++ *   3. re-run the CP hardware init and CP_ME_INIT (as stage 7a)
++ *   4. reload the zap shader to leave secure mode again (as stage 7c)
++ *   5. advance the fence slot to the last submitted sequence so every waiter
++ *      unblocks; the lost work is declared complete and the client resubmits it
++ *
++ * Fails closed: any step that does not settle marks the GPU lost - no further
++ * submit, no further recovery - so a reset that does not take degrades to
++ * today's behaviour (a reboot) instead of a reset loop. Rate-limited to
++ * GPU_RECOVER_MAX resets per boot for the same reason.
++ *
++ * The VBIF halt uses public a6xx.xml offsets but is best-effort: if the
++ * acknowledge does not arrive within the poll it proceeds to the reset anyway,
++ * so a wrong client mask cannot block recovery. A GMU-mediated reset with a
++ * full bus-transaction drain is the hardening path if this proves insufficient
++ * on hardware.
++ */
++bool
++sweet_gpu_recover(const char *why)
++{
++	vm_offset_t core = gpu_core, g = gpu_blob;
++
++	if (!gpu_recover_on || !gpu_live || gpu_lost || core == 0 || g == 0) {
++		return false;
++	}
++	if (gpu_recover_tries >= GPU_RECOVER_MAX) {
++		printf("SWEET GPU: recover (%s): %u resets reached, GPU lost\n", why, gpu_recover_tries);
++		gpu_lost = true;
++		return false;
++	}
++	gpu_recover_tries++;
++	printf("SWEET GPU: recover (%s): reset %u, fence slot %u last submitted %u\n", why,
++	    gpu_recover_tries, *(volatile uint32_t *)(g + GPU_CP_SCRATCH + GPU_CP_SCRATCH_FENCE),
++	    gpu_cp_seq);
++
++	/* 1. quiesce: stop the SQE, then halt the VBIF AXI clients (best effort). */
++	gpu_cp_wr(core, A6XX_CP_SQE_CNTL, 0);
++	gpu_cp_wr(core, A6XX_VBIF_XIN_HALT_CTRL0, A6XX_VBIF_XIN_HALT_MASK);
++	for (unsigned i = 0; i < 100; i++) {
++		if ((gpu_cp_rd(core, A6XX_VBIF_XIN_HALT_CTRL1) & A6XX_VBIF_XIN_HALT_MASK) ==
++		    A6XX_VBIF_XIN_HALT_MASK) {
++			break;
++		}
++		gpu_wait_ms(1);
++	}
++	gpu_cp_wr(core, A6XX_VBIF_XIN_HALT_CTRL0, 0);
++
++	/* 2. RBBM soft reset of the GPU core; the GMU keeps the rails and clocks up. */
++	gpu_cp_wr(core, A6XX_RBBM_SW_RESET_CMD, 1);
++	gpu_wait_ms(1);
++	gpu_cp_wr(core, A6XX_RBBM_SW_RESET_CMD, 0);
++	gpu_wait_ms(1);
++
++	/* 3. the CP comes back exactly as at boot. */
++	if (!gpu_cp_hw_init(core) || !gpu_cp_start(core, g + GPU_CP_RING)) {
++		printf("SWEET GPU: recover (%s): CP did not re-init, GPU lost\n", why);
++		gpu_lost = true;
++		return false;
++	}
++
++	/* 4. the reset dropped the GPU back into secure mode; the zap shader leaves it. */
++	if (!gpu_zap_load(g, gpu_gmem_pa)) {
++		printf("SWEET GPU: recover (%s): zap reload failed, GPU lost\n", why);
++		gpu_lost = true;
++		return false;
++	}
++
++	/* 5. retire the lost work: the CP writes rising sequences from here, and every
++	 *    waiter on an already-submitted fence now sees it done and unblocks. */
++	*(volatile uint32_t *)(g + GPU_CP_SCRATCH + GPU_CP_SCRATCH_FENCE) = gpu_cp_seq;
++	__asm__ volatile("dsb sy" ::: "memory");
++
++	printf("SWEET GPU: recover (%s): GPU live again at fence %u\n", why, gpu_cp_seq);
++	return true;
++}
++
+ void
+ sweet_gpu_probe(void)
+ {
+@@ -2974,6 +3078,11 @@ sweet_gpu_probe(void)
+ 	vm_offset_t gcc, cc, dbgc, misc, gmu, smmu, gpu, qf, db;
+ 
+ 	(void)PE_parse_boot_argn("adreno", &level, sizeof(level));
++	{
++		int rec = 0;	/* opt-in: GPU reset after a hang is experimental (see sweet_gpu_recover) */
++		(void)PE_parse_boot_argn("gpurecover", &rec, sizeof(rec));
++		gpu_recover_on = rec != 0;
++	}
+ 	if (level < 1) {
+ 		printf("SWEET GPU: probe off (adreno=1 enables it)\n");
+ 		return;
+@@ -3799,6 +3908,7 @@ gmu_only:
+ 									gpu_kept_up = true;
+ 									gpu_blob = g;
+ 									gpu_core = gpu;
++									gpu_gmem_pa = gmem_pa;  /* recovery reloads the zap shader from here */
+ 									gpu_live = true;
+ 									printf("SWEET GPU: GPU KEPT UP: GMU live, OOB gpu held, "
+ 									    "zap authenticated, ring live at wptr %u\n",
