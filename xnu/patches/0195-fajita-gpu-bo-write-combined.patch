@@ -10,7 +10,7 @@ index ac0cb66..1675129 100644
 +		 * Write-combined (kIOMapWriteCombineCache), like the arena and like NativeAdreno's
 +		 * system-memory BOs: no per-line cache maintenance per submission, only a barrier in
 +		 * gem_flush() to drain the write-combine buffer. The per-line flush over a whole spilled
-+		 * framebuffer each submission was the "PowerPoint" slowness.
++		 * framebuffer each submission was what dropped the UI to a few frames per second.
  		 */
  		IOLockLock(gAdrenoLock);
  		bool room = gAdrenoVmBytes + size <= GEM_VM_MAX;
@@ -31,7 +31,7 @@ index ac0cb66..1675129 100644
 +		/*
 +		 * Ordinary GEM BOs are write-combined (kIOMapWriteCombineCache), like the arena: there are
 +		 * no cache lines to clean, so the per-line flush over the whole BO - the cost that made the
-+		 * spilled framebuffers a "PowerPoint" - becomes one barrier that drains the write-combine
++		 * spilled framebuffers so slow - becomes one barrier that drains the write-combine
 +		 * buffer, so CPU stores reach memory before the GPU reads them.
 +		 */
 +		__asm__ volatile ("dsb sy" ::: "memory");

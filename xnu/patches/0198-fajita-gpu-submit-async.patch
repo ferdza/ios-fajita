@@ -8,7 +8,7 @@ index f077ac8..b85b0cf 100644
  
 +/*
 + * Ring backpressure. sweet_gpu_submit no longer drains the ring to empty on
-+ * every call (that serialised the CPU behind the GPU - the "PowerPoint"), so a
++ * every call (that serialised the CPU behind the GPU - the low frame rate), so a
 + * submit can now find the ring still holding earlier, unretired work. Block
 + * until the CP's RPTR has freed room for `need` dwords, bounded like the drain
 + * wait so a wedged CP is caught here too. gpu_ring_emit wraps blindly, so
