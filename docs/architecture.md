@@ -1,126 +1,128 @@
-# Architecture — les grosses pièces
+# Architecture — the major components
 
-Vue d'ensemble des composants du projet : ce que chacun fait, où il vit, et
-comment ils s'enchaînent. Pour les détails bas niveau voir
-[`NOTES-FAJITA.md`](../NOTES-FAJITA.md) et [`PORTING.md`](../PORTING.md).
+Overview of the project's components: what each one does, where it lives, and how
+they fit together. For low-level detail see [`NOTES-FAJITA.md`](../NOTES-FAJITA.md)
+and [`PORTING.md`](../PORTING.md).
 
 ```
-  bootloader OnePlus (ABL, fastboot)
-        │  charge boot_a (ou `fastboot boot` temporaire)
+  OnePlus bootloader (ABL, fastboot)
+        │  loads boot_a (or a temporary `fastboot boot`)
         ▼
-  shim/  ── EL2/EL1 minimal, saute dans XNU, passe le payload
-        │        payload = kernel + ADT + boot-args + blobs sweetfwN
+  shim/  ── minimal EL2/EL1 setup, jumps into XNU, passes the payload
+        │        payload = kernel + ADT + boot-args + sweetfwN blobs
         ▼
-  XNU (xnu-8796, patché)  ── bsd/ iokit/ osfmk/ …
-   ├─ UFS host driver ───────── monte la racine HFS+ dans `userdata`
-   ├─ Display (IOSurface + IOMobileFramebuffer / AppleCLCD, panneau iPhone X)
-   ├─ Touch RMI4 (I²C) + boutons PM8998 (SPMI)  → HID
-   └─ GPU Adreno 630
+  XNU (xnu-8796, patched)  ── bsd/ iokit/ osfmk/ …
+   ├─ UFS host driver ───────── mounts the HFS+ root inside `userdata`
+   ├─ Display (IOSurface + IOMobileFramebuffer / AppleCLCD, iPhone X panel)
+   ├─ RMI4 touch (I²C) + PM8998 buttons (SPMI)  → HID
+   └─ Adreno 630 GPU
         ├─ bsd/dev/sweet_gpu.c ───── bring-up + ring + fence + recovery
-        ├─ iokit/.../SweetAdreno.cpp ─ user client compatible msm
-        └─ iokit/.../SweetFramebuffer.cpp ─ présentation (vsync, swap)
+        ├─ iokit/.../SweetAdreno.cpp ─ msm-compatible user client
+        └─ iokit/.../SweetFramebuffer.cpp ─ present path (vsync, swap)
         ▼
-  iOS 16.7.16 userland (iPhone X, non modifié)
+  iOS 16.7.16 userland (iPhone X, unmodified)
    ├─ launchd + daemons + backboardd + SpringBoard
-   └─ Chlorophyll (driver Metal) ── AIR→NIR→ir3 (freedreno) → le user client
+   └─ Chlorophyll (Metal driver) ── AIR→NIR→ir3 (freedreno) → the user client
 ```
 
 ---
 
-## 1. La chaîne de boot (`shim/`, payload, ADT)
+## 1. Boot chain (`shim/`, payload, ADT)
 
-Le bootloader OnePlus (ABL) accepte un **boot image header v1** : `Image.gz`
-(gzip) + DTB appondu. Un header v2 ou un `Image` brut est rejeté. Notre image
-contient un **shim** : il met en place un environnement EL2/EL1 minimal et saute
-dans XNU en lui passant un **payload** :
+The OnePlus bootloader (ABL) accepts a **v1 boot image header**: a gzip `Image.gz`
+plus an appended DTB. A v2 header or a raw `Image` is rejected. Our image carries
+a **shim** that sets up a minimal EL2/EL1 environment and jumps into XNU, passing
+it a **payload**:
 
-- le **kernel** (`kernel.development.sweet`),
-- l'**ADT** (Apple Device Tree, construit par `tools/mkadt.py` — c'est le device
-  tree qu'XNU attend, pas le DTB Linux),
-- les **boot-args** (`CMDLINE`),
-- des **blobs firmware** annoncés `sweetfwN=<pa>:<size>` : `a630_gmu.bin`, le bloc
-  mémoire GMU, l'**arène** de buffers GPU (voyage en RAW dans l'image, d'où la
-  limite ~44 MiB sur `boot_a` ~64 MiB), et le pool de tables de pages.
+- the **kernel** (`kernel.development.sweet`),
+- the **ADT** (Apple Device Tree, built by `tools/mkadt.py` — this is the device
+  tree XNU expects, not the Linux DTB),
+- the **boot arguments** (`CMDLINE`),
+- **firmware blobs** announced as `sweetfwN=<pa>:<size>`: `a630_gmu.bin`, the GMU
+  memory block, the GPU buffer **arena** (it travels raw inside the boot image,
+  which is why it is bounded to ~44 MiB on the ~64 MiB `boot_a`), and the
+  page-table pool.
 
-Outils : `tools/build-fajita.sh` (orchestre), `tools/mkadt.py`,
+Tools: `tools/build-fajita.sh` (orchestrates), `tools/mkadt.py`,
 `tools/mkpayload.py`, `shim/build.sh`.
 
-## 2. Le port XNU (`xnu/patches/`)
+## 2. XNU port (`xnu/patches/`)
 
-XNU iOS 16 (xnu-8796) buildé par GitHub Actions via `blacktop/darwin-xnu-build`
-(runner macOS : il faut `iig` d'Apple et les libs KDK fermées → link macOS
-obligatoire). Toute la personnalisation est une **série de patchs numérotés**
-dans `xnu/patches/`, appliqués dans l'ordre par `git apply`. Config kernel
-`MACHINE_CONFIG=SWEET`, arm64 simple (pas arm64e/ptrauth).
+iOS 16 XNU (xnu-8796) built by GitHub Actions via `blacktop/darwin-xnu-build`
+(macOS runner: Apple's `iig` and the closed KDK support libraries are required,
+so the final link is macOS-only). All customization is a **numbered patch
+series** under `xnu/patches/`, applied in order with `git apply`. Kernel config
+`MACHINE_CONFIG=SWEET`, plain arm64 (no arm64e/ptrauth).
 
-Validation locale avant CI : `tools/xnu-cc.py` (voir
-[`gpu-progress.md`](gpu-progress.md)) rejoue les commandes de compil avec un
-clang système → attrape compil + link en quelques secondes.
+Local validation before CI: `tools/xnu-cc.py` (see
+[`gpu-progress.md`](gpu-progress.md)) re-runs the real compile commands with a
+system clang, catching compile and link errors in seconds.
 
-## 3. Stockage (UFS, racine HFS+)
+## 3. Storage (UFS, HFS+ root)
 
-Driver hôte UFS maison. La racine iOS est un volume **HFS+ journalisé** logé
-**dans la partition `userdata`** (décision 2026-10-15 : pas de modif GPT ;
-flasher écrase `userdata`). Construite par `tools/mkiosroot.sh` depuis l'IPSW
-iPhone X (OS/SystemOS/AppOS + shared cache + apps).
+An in-house UFS host driver. The iOS root is a **journaled HFS+ volume stored
+inside the `userdata` partition** (decision of 2026-10-15: no GPT changes, so
+flashing erases `userdata`). It is built by `tools/mkiosroot.sh` from the
+iPhone X IPSW (OS/SystemOS/AppOS + shared cache + stock apps).
 
-## 4. Affichage (IOSurface, IOMobileFramebuffer, AppleCLCD)
+## 4. Display (IOSurface, IOMobileFramebuffer, AppleCLCD)
 
-Services kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`), présentés comme un
-**panneau iPhone X**. C'est ce qui permet à CoreAnimation de composer. La
-présentation GPU passe ensuite par `SweetFramebuffer.cpp` (pièce 7).
+Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services, presented as an
+**iPhone X panel**. This is what lets CoreAnimation composite. GPU presentation
+then goes through `SweetFramebuffer.cpp` (component 7).
 
-## 5. GPU — cœur kernel (`bsd/dev/sweet_gpu.c`)
+## 5. GPU — kernel core (`bsd/dev/sweet_gpu.c`)
 
-Le bring-up Adreno 630 en étages (boot-arg `adreno=1..9`) : power/clocks (2),
-firmware GMU + HFI (3), GX rail/SPTPRAC (5), zap signé via TrustZone (6),
-command processor `hw_init`/`CP_ME_INIT` (7), keep-alive + espace d'adressage
-client 1 GiB + submit « command buffer + fence » + arène de buffers (8). Puis,
-en service : l'anneau PM4 (`gpu_ring_emit`/`flush`), les fences
-(`sweet_gpu_fence_*`, slot écrit par `CACHE_FLUSH_TS`), la soumission
-(`sweet_gpu_submit`, **asynchrone** depuis 0198 + back-pressure
-`gpu_ring_reserve`), le dump de hang et la **récupération** (`sweet_gpu_recover`,
-0197). Détails et série de patchs : [`gpu-progress.md`](gpu-progress.md).
+The staged Adreno 630 bring-up (boot-arg `adreno=1..9`): power/clocks (2), GMU
+firmware + HFI (3), GX rail / SPTPRAC (5), the signed zap through TrustZone (6),
+command processor `hw_init` / `CP_ME_INIT` (7), then keep-alive + a 1 GiB client
+address space + "command buffer + fence" submission + the buffer arena (8). In
+service it owns the PM4 ring (`gpu_ring_emit`/`flush`), the fences
+(`sweet_gpu_fence_*`, a slot written by `CACHE_FLUSH_TS`), submission
+(`sweet_gpu_submit`, **asynchronous** since 0198 with the `gpu_ring_reserve`
+back-pressure), the hang dump, and **recovery** (`sweet_gpu_recover`, 0197).
+Details and the patch series: [`gpu-progress.md`](gpu-progress.md).
 
-## 6. GPU — user client IOKit (`iokit/Kernel/arm/SweetAdreno.cpp`)
+## 6. GPU — IOKit user client (`iokit/Kernel/arm/SweetAdreno.cpp`)
 
-La surface **compatible msm** qu'un driver userspace ouvre : `GEM_NEW`/`INFO`/
-`SUBMIT`/`CPU_PREP`/`WAIT_FENCE`/`close`, les BOs (write-combined depuis 0195),
-l'espace d'adressage GPU, et la détection+récupération de hang câblée dans
-`waitFenceCall`. C'est l'ABI que Mesa/freedreno attend.
+The **msm-compatible** surface a userspace driver opens: `GEM_NEW`/`INFO`/
+`SUBMIT`/`CPU_PREP`/`WAIT_FENCE`/`close`, the buffer objects (write-combined
+since 0195), the GPU address space, and hang detection/recovery wired into
+`waitFenceCall`. This is the ABI Mesa/freedreno expects.
 
-## 7. GPU — présentation (`iokit/Kernel/arm/SweetFramebuffer.cpp`)
+## 7. GPU — present path (`iokit/Kernel/arm/SweetFramebuffer.cpp`)
 
-Le timer vsync (60 Hz) notifie CoreAnimation ; `swap()` marque la frame, et la
-présentation n'a lieu que sur une **frame complète** (fence done — 0194), ce qui
-a supprimé l'affichage de frames à moitié rendues. Throttle panneau `sweetfb_hz`.
+A 60 Hz vsync timer notifies CoreAnimation; `swap()` marks the frame, and
+presentation happens only for a **complete frame** (its fence is done — 0194),
+which stopped half-rendered frames from reaching the panel. The panel is
+throttled by `sweetfb_hz`.
 
 ## 8. Metal userspace (Chlorophyll / Bergamota)
 
-**Chlorophyll** = Mesa **freedreno** (compilateur ir3, cible a630) habillé en
-driver **Metal** d'Apple : `libbgair.dylib` fait AIR→NIR→ir3. **Bergamota** =
-la partie kernel GPU côté bring-up. Le bundle **SweetBGMTL.bundle** est le plugin
-Metal, chargé par `metalplugin=1`. C'est le driver **libre** qu'on garde ; le
-travail récent est la **colle kernel** autour (submit/fence/cache/recovery), pas
-une réécriture du driver.
+**Chlorophyll** is Mesa **freedreno** (the ir3 compiler, a630 target) presented
+as an Apple **Metal** driver: `libbgair.dylib` performs AIR→NIR→ir3. **Bergamota**
+is the kernel-side GPU bring-up. The **SweetBGMTL.bundle** is the Metal plugin,
+loaded by `metalplugin=1`. This is the open-source driver we keep; the recent
+work is the **kernel glue** around it (submit/fence/cache/recovery), not a rewrite
+of the driver.
 
-## 9. Entrées (tactile, boutons)
+## 9. Input (touch, buttons)
 
-Tactile **RMI4 sur I²C** (`0x20`, SE `0xa90000`) avec activation du rail, livré
-en événements HID digitizer. Boutons power/volume via **PM8998** (SPMI, usages
-`0x30`/`0xe9`/`0xea`). Identité device = iPhone X (`iPhone10,3`/D22) pour
-qu'UIKit prenne l'UI gestuelle.
+Touch is **RMI4 over I²C** (`0x20`, SE `0xa90000`) with rail enable, delivered as
+HID digitizer events. Power and volume buttons go through **PM8998** (SPMI, usages
+`0x30`/`0xe9`/`0xea`). The device identity is iPhone X (`iPhone10,3` / D22) so
+UIKit selects the gesture UI.
 
-## 10. Logs & diagnostic
+## 10. Logging & diagnostics
 
-Ring buffer persistant dans `userdata` + flush sur panic ; pull via OrangeFox
-(`tools/sweet-log-pull.sh`), filtré par `tools/sweet-log.py`. Le panneau est la
-première console (`sweetfb_noconsole` la coupe au premier swap pour laisser la
-GUI). Après un hang dur, une **photo du panneau fait foi** (le ring peut être
-périmé si le panic est arrivé pendant un flush).
+A persistent ring buffer in `userdata` plus a panic flush; pulled over OrangeFox
+(`tools/sweet-log-pull.sh`), filtered by `tools/sweet-log.py`. The panel is the
+first console (`sweetfb_noconsole` mutes it at the first swap to hand the screen
+to the GUI). After a hard hang, a **photo of the panel is authoritative** (the
+ring can be stale if the panic happened during a flush).
 
-## 11. Sécurité (stubs)
+## 11. Security (stubs)
 
-AMFI, sandbox et signature de code sont des **stand-ins permissifs** — ce n'est
-pas un iOS sécurisé. L'horloge démarre en 1969 (tout ce qui vérifie un certificat
-voit une date invalide).
+AMFI, the sandbox, and code signing are **permissive stand-ins** — this is not a
+secure iOS. The clock starts in 1969, so anything that checks a certificate sees
+an invalid date.

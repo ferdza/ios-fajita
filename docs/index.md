@@ -1,57 +1,60 @@
-# Documentation — sommaire
+# Documentation — index
 
-Point d'entrée de la doc du projet (iOS 16 + Metal/Adreno 630 sur OnePlus 6T).
+Entry point for the project documentation (iOS 16 userland + Metal/Adreno 630
+rendering on the OnePlus 6T, `fajita`).
 
-## Démarrer
+## Start here
 
-- **[../README.md](../README.md)** — présentation, ce qui marche, build & flash,
-  layout du dépôt. **À lire en premier.**
-- **[../PORTING.md](../PORTING.md)** — notes hardware et plan de bring-up.
-- **[../AGENTS.md](../AGENTS.md)** — règles de travail (handoff, commits,
-  sécurité des étapes destructives).
+- **[../README.md](../README.md)** — overview, what works, build & flash, repo
+  layout. **Read this first.**
+- **[../PORTING.md](../PORTING.md)** — hardware notes and the bring-up plan.
+- **[../AGENTS.md](../AGENTS.md)** — working rules (handoff, commits, safety of
+  destructive steps).
 
-## Vue d'ensemble
+## Overview
 
-- **[architecture.md](architecture.md)** — **les grosses pièces** : chaîne de
-  boot (shim/ADT/payload), port XNU, UFS, affichage, GPU kernel, user client
-  IOKit, présentation, driver Metal userspace, entrées, logs, sécurité.
+- **[architecture.md](architecture.md)** — **the major components**: boot chain
+  (shim / ADT / payload), XNU port, UFS storage, display, GPU kernel core, IOKit
+  user client, present path, Metal userspace driver, input, logging, security.
 
-## GPU / Metal (le chantier actuel)
+## GPU / Metal (current focus)
 
-- **[gpu-progress.md](gpu-progress.md)** — journal vivant : série de patchs
-  0193→0198 (ce que fait chacun + état), trouvailles, à-vérifier-sur-device,
-  cap long terme, **journal de test**.
-- **[gpu-reference-audit.md](gpu-reference-audit.md)** — comparaison de notre
-  code avec les projets de référence, findings priorisés, ce qui est corrigé et
-  ce qui reste.
-- **[gpu-multiring-design.md](gpu-multiring-design.md)** — design du chantier
-  long terme : soumission concurrente / multi-ring (étage logiciel sûr, puis
-  préemption HW optionnelle), avec le risque a630 documenté.
+- **[gpu-progress.md](gpu-progress.md)** — living status log: the 0193–0198 patch
+  series (what each does and its state), findings, open questions to confirm on
+  device, the long-term direction, and the **device test log**.
+- **[gpu-reference-audit.md](gpu-reference-audit.md)** — line-level comparison of
+  our code against the reference projects: prioritized findings, what is already
+  addressed, and what remains.
+- **[gpu-multiring-design.md](gpu-multiring-design.md)** — design for the
+  long-term performance direction: concurrent submission / multi-ring (a safe
+  software stage, then optional hardware preemption), with the a630 risk
+  documented.
 
-## Recherche
+## Research
 
-- **[research-and-similar-projects.md](research-and-similar-projects.md)** — le
-  paysage (ios-sweet, Bergamota/Chlorophyll, HackiOS, msm/freedreno,
-  UniXNU/Adreno740, Snapintosh) et ce qu'on tire de chacun.
+- **[research-and-similar-projects.md](research-and-similar-projects.md)** — the
+  landscape (ios-sweet, Bergamota/Chlorophyll, HackiOS, msm/freedreno,
+  UniXNU/Adreno740, Snapintosh) and what we take from each.
 
-## Historique & référence profonde
+## Deep reference & history
 
-- **[../NOTES-FAJITA.md](../NOTES-FAJITA.md)** — handoff de travail exhaustif :
-  état, registres, traps, numéros, prochaines étapes (gros fichier).
-- **[../NOTES.md](../NOTES.md)** — notes de la base ios-sweet.
-- **IOS16_README.md** — historique de la base iOS 16 (s'il est présent).
+- **[../NOTES-FAJITA.md](../NOTES-FAJITA.md)** — the exhaustive working handoff:
+  state, registers, traps, numbers, next steps (large file).
+- **[../NOTES.md](../NOTES.md)** — notes from the ios-sweet base.
+- **IOS16_README.md** — history of the iOS 16 base (if present).
 
-## Outils clés
+## Key tools
 
-- `tools/xnu-cc.py` — **compile-check local** d'un patch kernel (secondes, sans
-  macOS) avant de dépenser un run CI. Voir [gpu-progress.md](gpu-progress.md).
-- `tools/build-fajita.sh` — construit le boot image (kernel + ADT + payload).
-- `tools/check-hunk-counts.py` — vérifie que chaque patch s'applique en ordre.
-- `tools/sweet-log-pull.sh` / `tools/sweet-log.py` — récupère et filtre le log.
+- `tools/xnu-cc.py` — **local compile check** of a kernel patch (seconds, no
+  macOS) before spending a CI run. See [gpu-progress.md](gpu-progress.md).
+- `tools/build-fajita.sh` — builds the boot image (kernel + ADT + payload).
+- `tools/check-hunk-counts.py` — verifies every patch still applies in order.
+- `tools/sweet-log-pull.sh` / `tools/sweet-log.py` — pull and filter the device log.
 
 ---
 
-État résumé (**2026-11-02**) : l'UI iOS est rendue par le GPU (Metal). Chantier
-en cours = **vitesse** (0195 WC, 0198 submit async) et **freezes** (0196 cap du
-wait, 0197 récupération de hang, ON par défaut). Kernel 0193→0198 = run CI
-`41540055327`. Détails dans [gpu-progress.md](gpu-progress.md).
+**Status (2026-11-02):** the iOS UI is rendered by the GPU through Metal. Current
+work is **performance** (0195 write-combined buffers, 0198 asynchronous submit)
+and **freezes** (0196 bounded ring-drain wait, 0197 GPU hang recovery, on by
+default). The 0193–0198 kernel is CI run `41540055327`. Details in
+[gpu-progress.md](gpu-progress.md).

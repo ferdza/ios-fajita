@@ -1,104 +1,112 @@
-# Design — soumission concurrente / multi-ring (a630)
+# Design — concurrent submission / multi-ring (a630)
 
-Design du chantier perf long terme choisi : plusieurs files de soumission, pour
-que l'UI (compositeur, SpringBoard) ne soit pas bloquée derrière un gros rendu
-d'app. **Document de conception — pas encore implémenté.** À confronter aux
-résultats device de 0193→0198 (si le submit async mono-ring 0198 est déjà
-fluide, la partie HW préemption n'est pas urgente).
+Design for the chosen long-term performance effort: multiple submission queues,
+so the UI (the compositor, SpringBoard) is not blocked behind a heavy app render.
+**Design document — not yet implemented.** To be weighed against the 0193–0198
+device results (if the single-ring asynchronous submit from 0198 is already
+smooth, the hardware-preemption part is not urgent).
 
-Refs : UniXNU/Adreno740 (recover/preempt multi-ring, a7xx), Snapintosh
-(a8xx), msm/freedreno a6xx. Voir [research-and-similar-projects.md](research-and-similar-projects.md).
+References: UniXNU/Adreno740 (multi-ring recover/preempt, a7xx), Snapintosh
+(a8xx), msm/freedreno a6xx. See
+[research-and-similar-projects.md](research-and-similar-projects.md).
 
 ---
 
-## 1. Ce que ça apporte (et ce que ça n'apporte pas)
+## 1. What it gives (and what it does not)
 
-- **Apporte** : de la **priorité/réactivité**. Le compositeur peut passer devant
-  un rendu d'app long → l'UI reste réactive même quand une app charge le GPU.
-- **N'apporte pas** : du débit brut sur une seule charge. Pour un seul rendu,
-  un ring suffit. Le gain mono-charge vient déjà de 0195 (WC) + 0198 (async).
+- **Gives:** **priority / responsiveness.** The compositor can jump ahead of a
+  long app render, so the UI stays responsive even when an app loads the GPU.
+- **Does not give:** raw throughput on a single workload. For one render, a single
+  ring is enough. The single-workload gain already comes from 0195
+  (write-combined) + 0198 (asynchronous submit).
 
-Donc : **à juger après le test de 0198.** Si mono-ring async est fluide pour
-l'usage UI, ce chantier est un « nice-to-have » de réactivité, pas une urgence.
+So: **judge after the 0198 device test.** If single-ring asynchronous submit is
+smooth for UI use, this effort is a responsiveness "nice-to-have," not urgent.
 
-## 2. Ce que notre code a déjà
+## 2. What our code already has
 
-- Le user client IOKit expose déjà une notion de **`queueid`** (`QUEUE_IDS`,
-  masque `fQueues` dans `SweetAdreno.cpp`) — point d'accroche naturel.
-- Un **seul ring** (`gpu_cp_wptr`, `GPU_CP_RING`), un **seul compteur de fence**
-  (`gpu_cp_seq`), un slot de fence dans le scratch, un seul espace d'adressage.
-- Submit **asynchrone** + back-pressure `gpu_ring_reserve` (0198), et une
-  **récupération** mono-ring (`sweet_gpu_recover`, 0197).
+- The IOKit user client already exposes a **`queueid`** notion (`QUEUE_IDS`, the
+  `fQueues` mask in `SweetAdreno.cpp`) — a natural hook.
+- A **single ring** (`gpu_cp_wptr`, `GPU_CP_RING`), a **single fence counter**
+  (`gpu_cp_seq`), a fence slot in the scratch page, and a single address space.
+- **Asynchronous** submit + the `gpu_ring_reserve` back-pressure (0198), and a
+  single-ring **recovery** (`sweet_gpu_recover`, 0197).
 
-## 3. Grounding matériel — ⚠️ risque a630
+## 3. Hardware grounding — ⚠️ a630 risk
 
-La préemption Adreno **open-source n'est prouvée que sur a7xx+** (les séries msm
-sont intitulées « preemption for A7XX targets », activées sur a750/a7xx testés).
-Nos deux refs qui préemptent sont a7xx (Adreno740) et a8xx (Snapintosh). Pour
-**a630** (SDM845), la préemption HW existait en **downstream CAF/Qualcomm** mais
-n'est pas bien documentée en OSS. Incertitudes à lever avant de s'engager :
+Open-source Adreno preemption is **proven only on a7xx+** (the msm series are
+titled "preemption for A7XX targets," enabled on tested a750/a7xx parts). Both of
+our references that preempt are a7xx (Adreno740) and a8xx (Snapintosh). For
+**a630** (SDM845), preemption existed in **downstream CAF/Qualcomm** kernels but
+is not well documented in open source. Unknowns to resolve before committing:
 
-- le firmware **SQE** qu'on charge supporte-t-il `CP_CONTEXT_SWITCH` sur a630 ?
-- layout exact du **preempt record** a630 (WPTR sauvé, SMMU info, GPU_RO) ;
-- registres `CP_CONTEXT_SWITCH_CNTL` (niveau ringbuffer) — offsets à **revérifier
-  sur a6xx.xml**, jamais repris d'un a7xx.
+- does the **SQE** firmware we load support `CP_CONTEXT_SWITCH` on a630?
+- the exact a630 **preempt record** layout (saved write pointer, SMMU info,
+  GPU_RO buffer);
+- the `CP_CONTEXT_SWITCH_CNTL` (ringbuffer-level) registers — offsets to be
+  **re-verified against a6xx.xml**, never taken from an a7xx.
 
-Conclusion : ne pas porter directement la préemption HW d'un ref a7xx. Approche
-**étagée**, le niveau sûr d'abord.
+Conclusion: do not port an a7xx reference's hardware preemption directly. Use a
+**staged** approach, the safe level first.
 
-## 4. Design étagé
+## 4. Staged design
 
-### Étage A — multi-queue logiciel → un seul ring (sûr, d'abord)
-Pas de préemption HW. Le kernel ordonne plusieurs files client dans **le ring
-unique**, par priorité :
+### Stage A — software multi-queue → single ring (safe, first)
+No hardware preemption. The kernel orders several client queues into **the single
+ring**, by priority:
 
-- Par `queueid`, une petite structure de file (priorité, dernière fence).
-- `sweet_gpu_submit(queueid, …)` : au lieu d'émettre directement, **met en file**
-  les IBs ; un **scheduler** vide les files vers le ring en respectant la
-  priorité (compositeur > app), toujours en async + `gpu_ring_reserve`.
-- **Espace de fences** : garder un compteur global `gpu_cp_seq` (comme
-  Adreno740 : les rings partagent une numérotation), mais mémoriser la dernière
-  fence par file pour `WAIT_FENCE`.
-- Gain : l'ordre de soumission privilégie l'UI. Limite : ne **préempte pas** un
-  IB déjà en vol (une frame d'app déjà soumise finit avant que l'UI passe).
-- Risque : faible (on reste sur le modèle ring prouvé). Surtout du scheduling.
+- Per `queueid`, a small queue structure (priority, last fence).
+- `sweet_gpu_submit(queueid, …)`: instead of emitting directly, **enqueue** the
+  IBs; a **scheduler** drains the queues into the ring by priority (compositor
+  before app), still asynchronous and still using `gpu_ring_reserve`.
+- **Fence namespace:** keep a single global `gpu_cp_seq` (like Adreno740, where
+  the rings share one numbering), but remember the last fence per queue for
+  `WAIT_FENCE`.
+- Gain: submission order favors the UI. Limit: it does **not preempt** an IB
+  already in flight (an app frame already submitted finishes before the UI gets
+  through).
+- Risk: low (we stay on the proven ring model). Mostly scheduling.
 
-### Étage B — préemption HW ringbuffer (a630, avancé, optionnel)
-Deux rings matériels + `CP_CONTEXT_SWITCH` pour que le GPU bascule sur le ring
-haute priorité quand il a du travail, en préemptant le ring bas.
+### Stage B — hardware ringbuffer preemption (a630, advanced, optional)
+Two hardware rings + `CP_CONTEXT_SWITCH` so the GPU switches to the
+high-priority ring when it has work, preempting the low one.
 
-- Allouer un **2e ring** + un **preempt record** par ring (layout a630 à établir).
-- Programmer `CP_CONTEXT_SWITCH_CNTL` (niveau ringbuffer), postambule qui reset
-  les perf counters à la préemption (noté nécessaire par les revieweurs msm).
-- Intégrer la **récupération multi-ring** façon Adreno740 (`recover` qui gère le
-  ring fautif, avance les fences des deux, rejoue) — adapter à notre `sweet_gpu_recover`.
-- Gain : vraie préemption (l'UI passe devant un rendu long en cours).
-- Risque : **élevé sur a630** (firmware/record/registres non prouvés OSS). À ne
-  tenter qu'après l'étage A, avec validation device prudente et un **gate**
-  boot-arg (`gpupreempt=1`, OFF par défaut), fail-closed.
+- Allocate a **second ring** + a **preempt record** per ring (a630 layout to be
+  established).
+- Program `CP_CONTEXT_SWITCH_CNTL` (ringbuffer level), with a postamble that
+  resets the performance counters on preemption (msm reviewers noted this is
+  necessary).
+- Integrate **multi-ring recovery** in the style of Adreno740 (a `recover` that
+  handles the faulting ring, advances both rings' fences, and replays) — adapt
+  our `sweet_gpu_recover`.
+- Gain: true preemption (the UI jumps ahead of a long render in progress).
+- Risk: **high on a630** (firmware/record/registers not proven in open source).
+  Attempt only after Stage A, with careful device validation and a boot-arg
+  **gate** (`gpupreempt=1`, off by default), fail-closed.
 
-## 5. Ce qu'il faudrait toucher
+## 5. What would change
 
-| Zone | Étage A | Étage B |
+| Area | Stage A | Stage B |
 | --- | --- | --- |
-| `sweet_gpu.c` submit | mise en file + scheduler | + 2e ring, preempt record, CP_CONTEXT_SWITCH |
-| fences | dernière fence par file | idem + fence par ring partagée |
-| `SweetAdreno.cpp` | router par `queueid`, WAIT_FENCE par file | idem |
-| recover (0197) | inchangé | étendre au multi-ring (modèle Adreno740) |
+| `sweet_gpu.c` submit | enqueue + scheduler | + second ring, preempt record, CP_CONTEXT_SWITCH |
+| fences | last fence per queue | same + per-ring shared fence |
+| `SweetAdreno.cpp` | route by `queueid`, WAIT_FENCE per queue | same |
+| recovery (0197) | unchanged | extend to multi-ring (Adreno740 model) |
 | boot-arg | — | `gpupreempt=1` (opt-in, fail-closed) |
 
 ## 6. Validation
 
-- Étage A : compile-check local (`xnu-cc.py`), puis device — mesurer la
-  **réactivité UI** sous charge (une app qui rend lourd pendant qu'on scrolle).
-- Étage B : d'abord **confirmer le support préemption a630** (firmware SQE,
-  registres) par un test minimal isolé (un `CP_CONTEXT_SWITCH` sur deux rings
-  triviaux, lu en retour) **avant** toute intégration — comme les tests de boot
-  existants (`gpu_cp_nop_test`, etc.). Si le HW ne suit pas, on reste à l'étage A.
+- Stage A: local compile check (`xnu-cc.py`), then device — measure **UI
+  responsiveness** under load (an app rendering heavily while scrolling).
+- Stage B: first **confirm a630 preemption support** (SQE firmware, registers)
+  with a minimal isolated test (one `CP_CONTEXT_SWITCH` between two trivial rings,
+  read back) **before** any integration — like the existing boot tests
+  (`gpu_cp_nop_test`, etc.). If the hardware does not follow, stay at Stage A.
 
-## 7. Recommandation
+## 7. Recommendation
 
-1. Tester d'abord 0193→0198. Si l'UI est fluide, **étage A** suffit pour la
-   réactivité sous charge — faible risque, gros confort.
-2. N'aborder l'**étage B** (préemption HW a630) que si l'étage A ne suffit pas,
-   avec un test de faisabilité isolé d'abord, car a630 n'est pas balisé en OSS.
+1. Test 0193→0198 first. If the UI is smooth, **Stage A** is enough for
+   under-load responsiveness — low risk, large comfort gain.
+2. Approach **Stage B** (a630 hardware preemption) only if Stage A is not enough,
+   with an isolated feasibility test first, because a630 is not well-trodden in
+   open source.

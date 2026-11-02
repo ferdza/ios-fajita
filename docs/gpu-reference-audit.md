@@ -1,123 +1,120 @@
-# ios-fajita GPU — comparaison avec les références (audit)
+# GPU reference audit — our code vs the references
 
-Références lues : **UniXNU/Adreno740** (XNU + Adreno a7xx, Xiaomi Pad),
-**Cam396/Snapintosh** (hyperviseur EL2 + stack Adreno Metal/IOGPU, macOS 27,
-Snapdragon X2 a8xx), **msm/freedreno** (Linux, a6xx).
+References read: **UniXNU/Adreno740** (XNU + Adreno a7xx, Xiaomi Pad),
+**Cam396/Snapintosh** (EL2 hypervisor + Adreno Metal/IOGPU stack, macOS 27,
+Snapdragon X2 a8xx), and **msm/freedreno** (Linux, a6xx).
 
-⚠️ **Caveat version XNU** : Adreno740 et Snapintosh sont du XNU *bien plus
-récent* (macOS 26/27) et de l'Adreno a7xx/a8xx. On n'y copie **pas** d'API : on
-en tire la *méthode* et les *séquences hardware*, adaptées à notre xnu-8796
-(iOS 16) et à l'**a630/SDM845**. Les offsets de registres sont revérifiés sur
-a6xx.xml (pas repris tels quels : ex. RBBM_SW_RESET_CMD = 0x043 chez nous, pas
-0x073 comme l'a8xx de Snapintosh).
+⚠️ **XNU-version caveat.** Adreno740 and Snapintosh target a *much newer* XNU
+(macOS 26/27) and Adreno a7xx/a8xx. We copy **no** APIs from them: we take the
+*method* and the *hardware sequences*, adapted to our xnu-8796 (iOS 16) and to the
+**a630/SDM845**. Register offsets are re-verified against a6xx.xml rather than
+reused as-is (e.g. `RBBM_SW_RESET_CMD` is 0x043 for us, not the a8xx 0x073).
 
-Notre cœur GPU = `bsd/dev/sweet_gpu.c` (bring-up a630, 3868 l.) + le user client
-IOKit `iokit/Kernel/arm/SweetAdreno.cpp` + `SweetFramebuffer.cpp` (présentation).
-
----
-
-## Finding 1 — Submit synchrone (sérialisation) → **CORRIGÉ (0198)**
-
-**Notre code (avant)** : `sweet_gpu_submit` ET `gpu_cp_submit` finissaient par
-`gpu_ring_wait_idle(...)` → le CPU *busy-wait* (delay()) jusqu'à ce que le GPU
-draine TOUT le ring, à chaque frame. C'est de la sérialisation CPU↔GPU pure.
-
-**Les refs** : msm `a6xx_submit`, Adreno740 `submitUnfenced`, Snapintosh
-`adreno_ring_kick` → écrivent le ring, bougent le WPTR, **retournent tout de
-suite**. La synchro se fait *plus tard* via la fence.
-
-**Le fait clé** : notre client IOKit *sépare déjà* submit et attente
-(`submit()` pose `r->fence`, puis `CPU_PREP`/`WAIT_FENCE` attend) — donc le
-wait-idle dans submit était **redondant**. Probable gros contributeur au
-« PowerPoint », en plus des flushes de cache réglés par 0195.
-
-**Fix 0198** : `sweet_gpu_submit` retourne après le kick WPTR ; ajout de
-`gpu_ring_reserve` (back-pressure : attend que le RPTR libère de la place,
-car `gpu_ring_emit` wrap sans vérifier le RPTR — sûr seulement tant qu'on
-drainait à vide). `gpu_cp_submit` (tests de boot) reste synchrone.
+Our GPU core is `bsd/dev/sweet_gpu.c` (a630 bring-up, ~3900 lines) plus the IOKit
+user client `iokit/Kernel/arm/SweetAdreno.cpp` and `SweetFramebuffer.cpp` (present
+path).
 
 ---
 
-## Finding 2 — Aucune récupération de hang (le freeze) → **CORRIGÉ (0196+0197)**
+## Finding 1 — Synchronous submit (serialization) → **FIXED (0198)**
 
-**Notre code (avant)** : `gpu_ring_wait_idle` bouclait `100000 × 1 ms` = **100 s
-de busy-wait** si le CP était bloqué, puis `sweet_gpu_hang_dump` qui *ne reset
-rien*. → freeze total jusqu'au reboot.
+**Our code (before):** both `sweet_gpu_submit` and `gpu_cp_submit` ended with
+`gpu_ring_wait_idle(...)` → the CPU busy-waited (via `delay()`) until the GPU had
+drained the entire ring, on every frame. That is pure CPU↔GPU serialization.
 
-**Les refs** : Adreno740 `recover()` + Snapintosh `adreno_recover()` = séquence
-mûre : halt bus → reset cœur → ré-init CP → avance fence → replay/resubmit,
-avec garde fail-closed et rate-limiting.
+**The references:** msm `a6xx_submit`, Adreno740 `submitUnfenced`, Snapintosh
+`adreno_ring_kick` all write the ring, advance the write pointer, and **return
+immediately**. Synchronization happens *later* through the fence.
 
-**Fix 0196** : plafond du busy-wait à 3 s (msm hangcheck = 500 ms) → un wedge
-devient un stall borné, pas un freeze de 100 s.
+**The key fact:** our IOKit client *already* separates submit from waiting
+(`submit()` records `r->fence`, then `CPU_PREP`/`WAIT_FENCE` waits) — so the
+wait-idle inside submit was **redundant**. A likely major contributor to the
+low frame rate, on top of the cache flushes 0195 removes.
 
-**Fix 0197** (`sweet_gpu_recover`, gated `gpurecover=1`, OFF par défaut) :
-halt SQE + halt VBIF (ack best-effort) → **RBBM_SW_RESET** du cœur GPU (le GMU
-reste debout : un hang CP ne wedge pas le GMU) → `gpu_cp_hw_init` + `gpu_cp_start`
-→ recharge du **zap shader** (resort du mode sécurisé) → avance du slot fence à
-la dernière seq soumise (débloque tous les waiters) → `gpu_lost=false`.
-**Fail-closed** (toute étape qui ne settle pas ⇒ GPU déclaré lost, pas de
-boucle) et **rate-limité** (32 resets/boot). Câblé dans `waitFenceCall` et à
-l'échec de `gpu_ring_reserve`.
+**Fix 0198:** `sweet_gpu_submit` returns right after the write-pointer kick; added
+`gpu_ring_reserve` (back-pressure: wait for the read pointer to free room, because
+`gpu_ring_emit` wraps without checking it — safe only while we drained to empty).
+`gpu_cp_submit` (boot tests) stays synchronous.
 
-Leçons des refs intégrées : halt du bus **avant** reset (sinon des écritures
-GPU en vol corrompent la mémoire après reset) ; garde fail-closed ;
-rate-limiting ; reset du **cœur** (pas du GMU).
+## Finding 2 — No hang recovery (the freeze) → **FIXED (0196 + 0197)**
+
+**Our code (before):** `gpu_ring_wait_idle` looped `100000 × 1 ms` = **100 s of
+busy-wait** when the CP was wedged, then `sweet_gpu_hang_dump`, which *resets
+nothing* → a full freeze until reboot.
+
+**The references:** Adreno740 `recover()` + Snapintosh `adreno_recover()` are a
+mature sequence: halt the bus → reset the core → re-init the CP → advance the
+fence → replay/resubmit, with fail-closed guards and rate limiting.
+
+**Fix 0196:** cap the busy-wait at 3 s (msm hangcheck is 500 ms) → a wedge becomes
+a bounded stall, not a 100 s freeze.
+
+**Fix 0197** (`sweet_gpu_recover`, on by default, `gpurecover=0` disables):
+halt the SQE + halt the VBIF (best-effort ack) → **RBBM_SW_RESET** of the GPU core
+(the GMU stays up: a CP hang does not wedge the GMU) → `gpu_cp_hw_init` +
+`gpu_cp_start` → reload the **zap shader** (back out of secure mode) → advance the
+fence slot to the last submitted sequence (unblocks every waiter) →
+`gpu_lost = false`. **Fail-closed** (any step that does not settle marks the GPU
+lost, no loop) and **rate-limited** (32 resets/boot). Wired into `waitFenceCall`
+and into the `gpu_ring_reserve` failure path.
+
+Lessons from the references applied: halt the bus **before** reset (otherwise
+in-flight GPU writes corrupt memory afterward); fail-closed guards; rate limiting;
+reset the **core**, not the GMU.
+
+## Finding 3 — Cache coherency on GPU→CPU readback → **to watch**
+
+`sweet_gpu_cache_sync` is just a `dsb sy` barrier. Correct for our
+uncached / write-combined buffers (the arena and, since 0195, the GEM BOs). The
+references (Adreno740 `makeWriteCombined`, Snapintosh's `INVALIDATE` in
+adreno-ib) issue a `dc ivac` *only* for **cacheable** BOs the CPU reads after a
+GPU write. In our code the **display surfaces stay cacheable** (0195 touches only
+the GEM BOs): if the CPU reads a surface the GPU wrote without invalidation, it
+can read stale cache. To verify on device (residual graphical glitches, the
+wallpaper). Options: targeted invalidation in the present path, or make surfaces
+write-combined like the BOs.
+
+## Finding 4 — SMMU behavior on a fault → **noted (outside our control)**
+
+Adreno740 sets `stall_on_fault=0, continue_after_fault=1`, so an access fault does
+not wedge the GPU. In our code, stage 3c leaves the SMMU to the **hypervisor's
+stream table** — we do not configure the context bank, so this is hard to change.
+If the SMMU stalls on a fault, a single bad access can cause the hang (→ freeze).
+To confirm; otherwise 0197 recovery is the safety net.
+
+Good point: Adreno740 notes "FSR 0x400 is a format bit, not a fault." Our
+`sweet_gpu_hang_dump` tests `FSR & 0x2` (the real fault bit), not 0x400 — no false
+alarm from that side.
+
+## Finding 5 — Recovery hardening (if 0197 is insufficient on device)
+
+If RBBM_SW_RESET alone does not bring the GPU back, the hardening path, from
+Snapintosh's `adreno_recover`: a **GMU-mediated reset** + a full bus-transaction
+drain (halt GBIF/VBIF *acknowledged in stages*), write-one-to-clear of faults
+before reset, and an SQE image integrity check (hash) before writing. The VBIF
+client mask is to be confirmed (0xf assumed for a630).
 
 ---
 
-## Finding 3 — Cohérence cache sur lecture-retour GPU→CPU → **à surveiller**
+## Quality / method taken from the references
 
-`sweet_gpu_cache_sync` = juste une barrière `dsb sy`. Correct pour nos buffers
-**non-cachés / write-combined** (arène + BOs GEM depuis 0195). Les refs
-(Adreno740 `makeWriteCombined`, `INVALIDATE` dans Snapintosh adreno-ib) font un
-`dc ivac` *seulement* pour les BOs **cacheables** relus par le CPU après une
-écriture GPU. Chez nous les **surfaces d'affichage restent cacheables**
-(0195 ne touche que les BOs GEM) : si le CPU relit une surface écrite par le GPU
-sans invalidation, il peut lire du cache périmé. À vérifier sur device (bugs
-graphiques résiduels, fond d'écran). Piste : invalidation ciblée dans le chemin
-de présentation, ou passer les surfaces en WC comme les BOs.
+- **Local build**: `tools/xnu-cc.py` (improved, commit 729b5d7) validates each
+  patch in seconds with a system clang plus a CI buildtree → we no longer waste a
+  CI run on a compile error. The *final flashable* kernel still needs the macOS CI
+  (Apple's `iig` + closed KDK libraries).
+- **Opt-in gate** (boot-arg), **fail-closed**, **rate-limit**, **constant
+  provenance**, and **no invented hardware constants** (a630 offsets re-verified
+  against a6xx.xml).
 
-## Finding 4 — Comportement SMMU sur faute → **noté (hors de notre contrôle)**
+## CI plan (grouped — a single build)
 
-Adreno740 : `stall_on_fault=0, continue_after_fault=1` → une faute d'accès ne
-wedge pas le GPU. Chez nous, stage 3c laisse le SMMU au **stream table de
-l'hyperviseur** — on ne configure pas le context bank, donc on ne peut pas
-changer ce comportement facilement. Si le SMMU *stalle* sur faute, un seul
-mauvais accès peut provoquer le hang (→ freeze). À confirmer ; sinon la
-récupération 0197 est le filet de sécurité.
+Branch `fix/surface-row-align-64` = **0195 + 0196 + 0197 + 0198**. One CI build
+delivers them all. Device tests, in order:
 
-Bon point : Adreno740 dit « FSR 0x400 = bit de format, pas une faute ». Notre
-`sweet_gpu_hang_dump` teste bien `FSR & 0x2` (le vrai bit de faute), pas 0x400 —
-pas de fausse alerte de ce côté.
+1. Without `gpurecover`: check **smoothness** (0195 write-combined + 0198 async →
+   the frame rate should recover) and that a hang stalls only briefly (~3 s,
+   0196) rather than 100 s.
+2. With **`gpurecover=1`**: check that it **recovers** instead of freezing.
 
-## Finding 5 — Durcissement récupération (si 0197 insuffisant sur device)
-
-Si le RBBM_SW_RESET seul ne suffit pas (le GPU ne revient pas), le chemin de
-durcissement, d'après Snapintosh `adreno_recover` : reset **médié par le GMU**
-+ drain complet des transactions de bus (halt GBIF/VBIF *acquitté par étapes*),
-clear des fautes W1C avant reset, et vérification d'intégrité de l'image SQE
-(hash) avant d'écrire. Masque VBIF à confirmer (0xf supposé pour a630).
-
----
-
-## Qualité / méthode retenue des refs
-
-- **Build local** : `tools/xnu-cc.py` (amélioré, commit 729b5d7) valide chaque
-  patch en quelques secondes avec clang système + un `buildtree` CI → on ne
-  gâche plus un run CI sur une erreur de compil. Le kernel *final* flashable a
-  encore besoin du CI macOS (iig + libs KDK fermées d'Apple).
-- **Opt-in gate** (boot-arg), **fail-closed**, **rate-limit**, **provenance**
-  des constantes hardware, **pas de constante inventée** (offsets a6xx
-  revérifiés sur a6xx.xml).
-
-## Plan CI (groupé — un seul build)
-
-Branche `fix/surface-row-align-64` = **0195 + 0196 + 0197 + 0198**. Un seul
-build CI les livre tous. Tests device, dans l'ordre :
-1. Sans `gpurecover` : vérifier la **fluidité** (0195 WC + 0198 async → plus de
-   PowerPoint) et que le stall sur hang est borné (~3 s, 0196) et non 100 s.
-2. Avec **`gpurecover=1`** : vérifier que ça **récupère** au lieu de freezer.
-
-Boot-args : `...adreno=9 zap=1 gpuhold=1 metalplugin=1` (+ `gpurecover=1` pour
-le test 2). ARENA_MIB=40.
+Boot args: `…adreno=9 zap=1 gpuhold=1 metalplugin=1` (+ `gpurecover=1` for test
+2). `ARENA_MIB=40`.

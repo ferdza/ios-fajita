@@ -40,7 +40,8 @@ The UI renders on the GPU, but two problems are being worked (series 0193–0198
 
 - **Speed.** The Metal submit path no longer drains the ring to idle on every frame
   (0198, async submit) and ordinary buffers are write-combined instead of per-line flushed
-  (0195). This removes the CPU↔GPU serialization behind the earlier "PowerPoint" slowness.
+  (0195). This removes the CPU↔GPU serialization behind the earlier low frame rate (the UI
+  ran at only a few frames per second).
 - **Freezes.** A wedged command processor used to busy-wait 100 s and never recover. The
   drain wait is now capped (0196) and a **hang-recovery** path resets the GPU core and lets
   the client resubmit (0197, on by default; `gpurecover=0` disables).
