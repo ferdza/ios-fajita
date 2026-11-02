@@ -1,0 +1,59 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index e1e8ae5..d34d281 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -303,37 +303,34 @@ AppleCLCD::vsyncFired(OSObject *owner, IOTimerEventSource *sender)
+ 		return;
+ 	}
+ 	bool flush = fb->fDirty && (count % fb->fFlushTicks) == 0;
++	static uint32_t presents, deferred;
++	/*
++	 * Only copy a frame whose GPU work has finished. SwapEnd arrives while the GPU is still
++	 * drawing that frame (the Metal commit is asynchronous), so copying now shows a half-drawn
++	 * or stale surface - the black/old frames. The earlier code blocked this timer up to 50 ms
++	 * and, on timeout (95% of the time under load), copied the unfinished frame anyway. Instead,
++	 * leave it dirty and retry on a later tick: the panel then only ever shows completed frames,
++	 * and the timer never blocks. A later SwapEnd overwrites fPending and fPendingFence, so a
++	 * frame that never finishes is simply replaced by a newer one. fence 0 (a CPU-drawn surface)
++	 * and a lost GPU present immediately.
++	 */
++	if (flush && fb->fPendingFence != 0 && sweet_gpu_ready() &&
++	    !sweet_gpu_fence_done(fb->fPendingFence)) {
++		flush = false;
++		deferred++;
++	}
+ 	uint8_t *rec = NULL;
+-	uint32_t fence = 0;
+ 	if (flush) {
+ 		rec = (uint8_t *)IOMallocData(SWEET_FB_SWAP_REC_SIZE);
+ 		if (rec != NULL) {
+ 			memcpy(rec, fb->fPending, SWEET_FB_SWAP_REC_SIZE);
+-			fence = fb->fPendingFence;
+ 			fb->fDirty = false;
+ 		}
+ 	}
+ 	IOLockUnlock(fb->fLock);
+ 	if (rec != NULL) {
+-		/*
+-		 * Under Metal, SwapEnd arrives while the GPU is still drawing that frame (the commit is
+-		 * asynchronous), so copying now shows what the buffer held two swaps ago - the
+-		 * "repeating old frames". Wait for every submission made before the swap; CPU-drawn
+-		 * frames (fence 0) and a lost GPU skip the wait.
+-		 */
+-		static uint32_t presents, waited, timedout;
+-		if (fence != 0 && sweet_gpu_ready() && !sweet_gpu_fence_done(fence)) {
+-			waited++;
+-			for (int ms = 0; !sweet_gpu_fence_done(fence); ms++) {
+-				if (ms >= 50 || !sweet_gpu_ready()) {
+-					timedout++;
+-					break;
+-				}
+-				IOSleep(1);
+-			}
+-		}
+ 		if ((++presents % 100) == 0) {
+-			IOLog("SWEET FB: %u presents, %u waited for the GPU, %u timed out\n", presents, waited, timedout);
++			IOLog("SWEET FB: %u presents, %u deferred for the GPU\n", presents, deferred);
+ 		}
+ 		fb->present(rec);
+ 		IOFreeData(rec, SWEET_FB_SWAP_REC_SIZE);
