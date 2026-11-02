@@ -30,6 +30,13 @@ rendering on the OnePlus 6T, `fajita`).
   software stage, then optional hardware preemption), with the a630 risk
   documented.
 
+## Connectivity (research)
+
+- **[connectivity-research.md](connectivity-research.md)** — Wi-Fi, Bluetooth and
+  USB: the hardware (WCN3990, DWC3), what already works (USB device + CDC-ECM),
+  the XNU path for each, references, and a suggested priority order. Research
+  only, not yet implemented.
+
 ## Research
 
 - **[research-and-similar-projects.md](research-and-similar-projects.md)** — the
