@@ -22,6 +22,10 @@ rendering on the OnePlus 6T, `fajita`).
 - **[gpu-progress.md](gpu-progress.md)** — living status log: the 0193–0198 patch
   series (what each does and its state), findings, open questions to confirm on
   device, the long-term direction, and the **device test log**.
+- **[gpu-turnip-bringup.md](gpu-turnip-bringup.md)** — **the Turnip (Vulkan) Metal
+  driver bring-up recipe**: the driver is done on `ferdza/chlorophyll@ios26`, the
+  fajita kernel is ready (selectors + `0200` params); this is the macOS build +
+  device install + boot-args to run it on fajita.
 - **[gpu-audit-2026-11.md](gpu-audit-2026-11.md)** — **step-back audit (2026-11-03)**
   after the 0199 panic. Conclusions (see "What still holds"): **HUPCF (0199)
   caused the panic — gate it off**; the hang is a **shader faulting on a garbage
