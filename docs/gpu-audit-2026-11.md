@@ -364,6 +364,62 @@ patches.
 > summaries and the nullmoth docs, not direct fetches. Allow those hosts to verify
 > inline.
 
+## DECISIVE: Turnip already works on the A630 upstream — we are behind (2026-11-03)
+
+Scoping the chosen Metal→Vulkan→Turnip direction found that it is **not new work
+to invent** — upstream **Bergamota/Chlorophyll has already done it and proven it
+on the A630**, which is our exact GPU (Bergamota targets `beryllium` = Pocophone
+F1 = SDM845/Adreno 630, the same SoC/GPU as fajita; the two ports share the
+Chlorophyll driver).
+
+From Bergamota `NOTES.md` + `gpu/metal/docs/TURNIP.md` (2026-10-26), on the A630:
+- `tu_smoke`: **"Turnip Adreno (TM) 630, Vulkan 1.3.305; clear + triangle +
+  readback PASS (8192/8192 pixels)."**
+- The Metal device (`bgmtl.m`) runs on Turnip; **every Metal probe passes**
+  (`chl_test` 29/29).
+- **Turnip 3.4–4.2 µs/draw vs our Gallium path 9–17 µs/draw** (~3× faster).
+- Upstream directive: **"drop Gallium completely and replace it with Turnip."**
+- Our checkout of Chlorophyll is on `main` (Gallium); the Turnip work is on the
+  `turnip`/`ios26` branches. **Our fajita ships the old Gallium path — we are
+  simply behind upstream.**
+
+This also explains our long-standing symptoms without new guesses:
+- **"Apple logo for too long"** (gpu-metal7/8): the first command buffer takes
+  ~40 s because **pipeline creation happens under `bg_lock`** while CoreAnimation
+  compiles its startup shaders. Known; the plan fixes it (pipelines out of the
+  lock + an AIR→NIR cache).
+- **"Powerpoint"/slow:** Gallium 9–17 µs/draw + the per-call GEM-buffer runtime +
+  the 30 Hz panel cap (`sweetfb_hz=30`). Turnip + the T3 encoder removes the
+  driver as the bottleneck.
+- **Wild descriptors / corrupt icons:** the bespoke `air_metal.c`-on-Gallium
+  state tracking; Turnip has the validated a6xx cache/barrier handling.
+
+### Adoption plan (upstream's T1–T7, reused not invented)
+
+The full plan is in `Bergamota/gpu/metal/docs/TURNIP.md`. Assets are already local
+(`turnip/build-turnip.sh`, `patches/turnip-ios.patch`, Mesa 25.0.7 which we have;
+UniXNU's `tu_knl_darwin.cc` is the T7 native-backend template).
+
+1. **Sync Chlorophyll to the Turnip branch** (`ios26`/`turnip`) and build Turnip
+   for a630 arm64e (`build-turnip.sh` + `turnip-ios.patch`). Gallium `libbgair`
+   stays installed in parallel until T5.
+2. **Confirm the fajita KERNEL has the Turnip ABI** the shim needs — the
+   `freedreno-sweet` **syncobj emulation + prime-fd** support and the full
+   `MSM_PARAM` set Turnip queries (`VA_START/VA_SIZE`, `GMEM_BASE/SIZE`,
+   `HIGHEST_BANK_BIT`, `UBWC_SWIZZLE`, `MACROTILE_MODE`, `PRIORITIES`). Our kernel
+   answers only a subset today; port the rest from Bergamota's `sweet_drm.c` /
+   user client. **This is the only kernel work, and it is additive.**
+3. **Port the Metal runtime** `air_metal.c`/`bgmtl.m` onto Turnip (plan T1–T4):
+   compute → render → the `rwa_cmdbuf_*` encoder recording straight into
+   `VkCommandBuffer` (this is what removes `bg_lock`/`BGWork` and the per-call GEM
+   buffers), → IOSurfaces/drawables.
+4. **T5 on device**, then **T6 delete Gallium**, optional **T7** native
+   `tu_knl_sweet.cc` backend (replacing the msm emulation), using UniXNU as the
+   template.
+
+Net: our kernel work is kept and only extended; the real effort is adopting
+upstream's Turnip runtime. The direction is proven on our exact GPU.
+
 ## Open questions for the maintainer
 
 - Phase 2: prefer **(a) cacheable + ranged clean** (less churn, closest to the

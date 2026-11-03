@@ -43,6 +43,25 @@ down:
 **Next concrete step:** test the 0199 kernel on device — does the page fault
 still wedge, or does the GPU retire the batch and keep going? Then decide B/C.
 
+### DIRECTION CHANGE (2026-11-03): move the Metal userspace to Turnip (Vulkan)
+
+A multi-source audit (`docs/gpu-audit-2026-11.md`) concluded the persistent GPU
+fragility is in the **userspace Metal driver**, not the kernel. Every working
+Metal-on-GPU project uses **Metal→Vulkan**; ours is the only one on gallium
+freedreno GL via a bespoke `air_metal.c` (our `Chlorophyll/build-ios.sh` builds
+`-Dvulkan-drivers=` empty — Turnip not built). **Upstream Bergamota/Chlorophyll
+already ported Chlorophyll to Turnip and proved it on the A630** (same SoC/GPU as
+fajita; `tu_smoke` passes, Metal probes pass, 3–4 µs/draw vs gallium 9–17). It
+even explains the "Apple-logo-too-long" stall (pipeline creation under `bg_lock`).
+
+User chose this direction (2026-11-03). Plan = adopt upstream's T1–T7
+(`Bergamota/gpu/metal/docs/TURNIP.md`): sync Chlorophyll to the `turnip`/`ios26`
+branch, build Turnip for a630, extend the fajita kernel with the syncobj/prime-fd
++ full `MSM_PARAM` set Turnip needs (additive; kernel work is kept), port the
+`bgmtl.m` runtime to record into `VkCommandBuffer`, then drop Gallium. The kernel
+GPU driver (`sweet_gpu.c`) is roughly correct and reused. Stop piling kernel GPU
+patches (0195–0199) for correctness; 0199/HUPCF should stay gated off.
+
 ---
 
 ### Earlier handoff (2026-10-30): root reflashed; cause of the corruption found
