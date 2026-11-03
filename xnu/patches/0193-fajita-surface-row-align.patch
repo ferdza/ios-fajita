@@ -1,0 +1,27 @@
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index deb8d4e..6e72103 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -303,6 +303,22 @@ sweet_surface_layout(SweetSurface *s, OSDictionary *props)
+ 	}
+ 	s->bytesPerRow = sweet_dict_u32(props, "IOSurfaceBytesPerRow",
+ 	    sweet_row_bytes(s->width, s->elementWidth, s->bytesPerElement));
++	/*
++	 * a6xx/freedreno will not import a texture whose row pitch is not a multiple of 64
++	 * (fdl6 pitchalign). QuartzCore hands a few surfaces (icon masks, small backdrops) a
++	 * tighter IOSurfaceBytesPerRow, which backboardd then cannot sample ("texture refused
++	 * ... not a multiple of 64"). Round the client's pitch up to the same alignment the
++	 * kernel's own surfaces already use; the padded value is reported back to the client
++	 * (offset 0x28) and the allocation grows with it below, so the writer and the GPU
++	 * agree on the pitch.
++	 */
++	uint32_t alignedRow = (uint32_t)((s->bytesPerRow + SWEET_SURFACE_ROW_ALIGN - 1) &
++	    ~(uint32_t)(SWEET_SURFACE_ROW_ALIGN - 1));
++	if (alignedRow != s->bytesPerRow) {
++		IOLog("SWEET SURFACE: pad %ux%u pitch %u -> %u\n", s->width, s->height,
++		    s->bytesPerRow, alignedRow);
++		s->bytesPerRow = alignedRow;
++	}
+ 	if (s->bytesPerRow < (uint64_t)sweet_div_up(s->width, s->elementWidth) * s->bytesPerElement) {
+ 		return kIOReturnBadArgument;
+ 	}

@@ -1,0 +1,59 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 1a64551..70672a0 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -220,6 +220,16 @@ extern void delay(unsigned);
+ #define GPU_MAIR0_CB          0x0004ff44u
+ #define GPU_ACTLR_CB          0x70000000u
+ #define GPU_SCTLR_CB          0x00c01067u
++/*
++ * HUPCF (Hit Under Previous Context Fault), SCTLR bit 8. With it clear - our
++ * stock value - the SMMU terminates every later transaction of a context once
++ * that context has an uncleared fault, so one bad GPU access wedges the whole
++ * batch (ring drained, GPU still busy, fence never posts). UniXNU's a7xx driver
++ * runs the GPU context with stall_on_fault=0 (which we already do: CFCFG, bit 7,
++ * is clear) AND continue_after_fault=1, i.e. HUPCF set, so the GPU keeps being
++ * served past a fault and still retires the batch. Set it to match.
++ */
++#define GPU_SCTLR_HUPCF       0x100u
+ 
+ /* HFI v1 */
+ #define HFI_QHDR_DW           12u
+@@ -536,6 +546,7 @@ static uint32_t gpu_last_fence;
+ static vm_offset_t gpu_pt_blob;      /* where the page tables live */
+ static uint64_t gpu_gmem_pa;         /* GMU-memory blob PA, kept for a zap reload during recovery */
+ static bool gpu_recover_on = true;   /* on by default; boot-arg gpurecover=0 disables the reset */
++static uint32_t gpu_sctlr_cb = GPU_SCTLR_CB | GPU_SCTLR_HUPCF;  /* HUPCF on by default; gpuhupcf=0 restores the stock SCTLR */
+ static unsigned gpu_recover_tries;   /* resets attempted this boot; a backstop against a reset loop */
+ #define GPU_RECOVER_MAX 32u          /* past this many resets the GPU is declared lost until reboot */
+ 
+@@ -3127,6 +3138,11 @@ sweet_gpu_probe(void)
+ 		(void)PE_parse_boot_argn("gpurecover", &rec, sizeof(rec));
+ 		gpu_recover_on = rec != 0;
+ 	}
++	{
++		int hupcf = 1;	/* on by default; gpuhupcf=0 restores the stock SCTLR (no HUPCF) */
++		(void)PE_parse_boot_argn("gpuhupcf", &hupcf, sizeof(hupcf));
++		gpu_sctlr_cb = hupcf ? (GPU_SCTLR_CB | GPU_SCTLR_HUPCF) : GPU_SCTLR_CB;
++	}
+ 	if (level < 1) {
+ 		printf("SWEET GPU: probe off (adreno=1 enables it)\n");
+ 		return;
+@@ -3689,7 +3705,7 @@ gmu_only:
+ 			}
+ 			gpu_wait_ms(1);
+ 		}
+-		gpu_wr_quiet(b, GPU_SMMU_CB_SCTLR, GPU_SCTLR_CB);
++		gpu_wr_quiet(b, GPU_SMMU_CB_SCTLR, gpu_sctlr_cb);
+ 		__asm__ volatile("dmb oshst" ::: "memory");
+ 		printf("SWEET GPU: cb0 sctlr %#x tcr %#x tcr2 %#x ttbr0 %#x%08x mair0 %#x\n",
+ 		    gpu_rd_quiet(b, GPU_SMMU_CB_SCTLR), gpu_rd_quiet(b, GPU_SMMU_CB_TCR),
+@@ -3736,7 +3752,7 @@ gmu_only:
+ 				}
+ 				gpu_wait_ms(1);
+ 			}
+-			gpu_wr_quiet(b1, GPU_SMMU_CB_SCTLR, GPU_SCTLR_CB);
++			gpu_wr_quiet(b1, GPU_SMMU_CB_SCTLR, gpu_sctlr_cb);
+ 
+ 			uint32_t want_s2 = GPU_S2CR_TRANS(1), want_smr = GPU_SMR_VALID | 0u;
+ 			gpu_wr_quiet(smmu, GPU_SMMU_S2CR(2), want_s2);

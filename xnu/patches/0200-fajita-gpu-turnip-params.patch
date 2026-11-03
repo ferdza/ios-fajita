@@ -1,0 +1,41 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 70672a0..407ecab 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -407,6 +407,17 @@ extern void delay(unsigned);
+ #define GPU_PARAM_PP_PGTABLE    8u
+ #define GPU_PARAM_VA_START      0x0eu
+ #define GPU_PARAM_VA_SIZE       0x0fu
++/*
++ * Turnip (Vulkan) queries these too. Without HIGHEST_BANK_BIT Turnip defaults it
++ * to 0, which is wrong for the a630 and corrupts UBWC tiling. Values are the
++ * SDM845 ones adopted from Bergamota (ios-beryllium, same SoC/GPU): UBWC 2.0,
++ * highest bank bit 15; UBWC swizzle 0x6 (Linux qcom_ubwc_config sdm845); macrotile
++ * mode 0 (4 channels); a630 has no ray tracing.
++ */
++#define GPU_PARAM_HIGHEST_BANK_BIT 0x10u
++#define GPU_PARAM_RAYTRACING    0x11u
++#define GPU_PARAM_UBWC_SWIZZLE  0x12u
++#define GPU_PARAM_MACROTILE_MODE 0x13u
+ #define GPU_EXTENT_MAX          8u
+ 
+ struct gpu_extent {
+@@ -1744,6 +1755,18 @@ sweet_gpu_param(uint32_t which, uint64_t *value)
+ 	case GPU_PARAM_VA_SIZE:
+ 		*value = GPU_VA_BYTES;
+ 		break;
++	case GPU_PARAM_HIGHEST_BANK_BIT:
++		*value = 15;            /* SDM845: UBWC 2.0, highest bank bit 15 */
++		break;
++	case GPU_PARAM_RAYTRACING:
++		*value = 0;             /* a630 has no ray tracing */
++		break;
++	case GPU_PARAM_UBWC_SWIZZLE:
++		*value = 6;             /* Linux qcom_ubwc_config sdm845: 0x6 */
++		break;
++	case GPU_PARAM_MACROTILE_MODE:
++		*value = 0;             /* 4 channels */
++		break;
+ 	default:
+ 		return false;
+ 	}

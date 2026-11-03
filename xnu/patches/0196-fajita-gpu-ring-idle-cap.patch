@@ -1,0 +1,25 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 7de6543..d72ab58 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1345,10 +1345,19 @@ gpu_ring_flush(vm_offset_t core, unsigned wptr)
+ 	gpu_cp_wr(core, A6XX_CP_RB_WPTR, wptr);
+ }
+ 
++/*
++ * A hung CP never drains the ring, so the old 100000 ms (100 s) budget was a
++ * 100-second busy-wait that froze whichever thread was mid-submit - the
++ * "freeze" on a GPU hang. msm's hangcheck fires at 500 ms; 3 s is generous for
++ * any real drain (a phone frame retires in well under a millisecond) and turns
++ * a wedge into a bounded stall the caller can act on (recover) instead.
++ */
++#define GPU_RING_IDLE_MS        3000u
++
+ static bool
+ gpu_ring_wait_idle(vm_offset_t core, const char *what)
+ {
+-	for (unsigned i = 0; i < 100000; i++) {
++	for (unsigned i = 0; i < GPU_RING_IDLE_MS; i++) {
+ 		if (gpu_cp_rd(core, A6XX_CP_RB_RPTR) == gpu_cp_wptr) {
+ 			printf("SWEET GPU: cp %s: ring idle (RPTR=WPTR=%u) rbbm_status %#x\n",
+ 			    what, gpu_cp_wptr, gpu_cp_rd(core, A6XX_RBBM_STATUS));

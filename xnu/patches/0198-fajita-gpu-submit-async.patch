@@ -1,0 +1,98 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index f077ac8..b85b0cf 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -1977,6 +1977,33 @@ sweet_gpu_cache_sync(void *va, size_t len)
+ 
+ bool sweet_gpu_recover(const char *why);      /* defined below, before the bring-up */
+ 
++/*
++ * Ring backpressure. sweet_gpu_submit no longer drains the ring to empty on
++ * every call (that serialised the CPU behind the GPU - the low frame rate), so a
++ * submit can now find the ring still holding earlier, unretired work. Block
++ * until the CP's RPTR has freed room for `need` dwords, bounded like the drain
++ * wait so a wedged CP is caught here too. gpu_ring_emit wraps blindly, so
++ * without this a fast client would lap the CP and overwrite unread packets.
++ */
++static bool
++gpu_ring_reserve(vm_offset_t core, unsigned need)
++{
++	const unsigned size = GPU_CP_RING_BYTES / 4u;
++
++	if (need >= size) {
++		return false;                           /* a submit larger than the ring never fits */
++	}
++	for (unsigned i = 0; i < GPU_RING_IDLE_MS; i++) {
++		unsigned rptr = gpu_cp_rd(core, A6XX_CP_RB_RPTR);
++		unsigned used = (gpu_cp_wptr - rptr) % size;    /* dwords the CP has not yet consumed */
++		if (used + need < size - 1u) {                  /* keep a slot: wptr must not meet rptr */
++			return true;
++		}
++		gpu_wait_ms(1);
++	}
++	return false;
++}
++
+ /* One CP_INDIRECT_BUFFER per command buffer, then the CACHE_FLUSH_TS fence - Linux's
+  * a6xx_submit tail, which is what their submit path hands us. */
+ uint32_t
+@@ -1985,6 +2012,11 @@ sweet_gpu_submit(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned co
+ 	if (!gpu_live || ib_iova == NULL || ib_dwords == NULL || count == 0) {
+ 		return 0;
+ 	}
++	/* 4 dwords for the CCU invalidate, 4 per IB, 5 for the CACHE_FLUSH_TS fence. */
++	if (!gpu_ring_reserve(gpu_core, 9u + count * 4u)) {
++		sweet_gpu_recover("ring full");
++		return 0;
++	}
+ 	/*
+ 	 * As msm's a6xx_submit: invalidate the CCU's depth and colour caches first. Mesa relies on the
+ 	 * kernel for this between submissions; without it a render target read back as a texture can
+@@ -2008,12 +2040,13 @@ sweet_gpu_submit(const uint64_t *ib_iova, const uint32_t *ib_dwords, unsigned co
+ 	gpu_ring_emit(gpu_blob + GPU_CP_RING, ++gpu_cp_seq);
+ 	gpu_ring_flush(gpu_core, gpu_cp_wptr);
+ 
+-	if (!gpu_ring_wait_idle(gpu_core, "submit")) {
+-		/* The CP wedged mid-frame. Try to reset it so the client can resubmit;
+-		 * without recovery this frame and every waiter behind it hang (the freeze). */
+-		sweet_gpu_recover("submit drain");
+-		return 0;
+-	}
++	/*
++	 * Return without draining the ring: the GPU runs this submission while the
++	 * CPU builds the next frame. The client synchronises through CPU_PREP /
++	 * WAIT_FENCE on the sequence returned here (SweetAdreno.cpp), so the old
++	 * wait-idle was pure serialisation. A wedge is caught by the next submit's
++	 * reserve, by WAIT_FENCE's timeout, or by the present path - each recovers.
++	 */
+ 	return gpu_cp_seq;
+ }
+ 
+diff --git a/iokit/Kernel/arm/SweetAdreno.cpp b/iokit/Kernel/arm/SweetAdreno.cpp
+index 1675129..3c435a8 100644
+--- a/iokit/Kernel/arm/SweetAdreno.cpp
++++ b/iokit/Kernel/arm/SweetAdreno.cpp
+@@ -57,6 +57,7 @@ void sweet_gpu_mark_lost(void);
+ void sweet_gpu_report(const char *why);
+ uint64_t sweet_gpu_hang_dump(const char *why);
+ void sweet_gpu_hang_ibs(uint64_t *ib1, uint64_t *ib2);
++bool sweet_gpu_recover(const char *why);
+ bool     sweet_gpu_alloc_pages(uint64_t size, uint64_t *pa, void **kva);
+ void     sweet_gpu_free_pages(uint64_t pa, uint64_t size);
+ /* osfmk/arm64/caches_asm.s: clean the dcache for a physical range via the linear map. */
+@@ -945,6 +946,15 @@ SweetAdrenoUserClient::waitFenceCall(struct sweet_msm_wait_fence *r)
+ 			if (far != 0) {
+ 				findAddress(far);       /* far == 1: no SMMU fault, only the IB dumps say anything */
+ 			}
++			/*
++			 * Async submit no longer drains the ring, so a wedged GPU surfaces
++			 * here. Reset it (gpurecover=1); recovery advances the fence slot
++			 * past r->fence, force-retiring the lost frame so the client
++			 * unblocks and draws the next one instead of freezing until reboot.
++			 */
++			if (sweet_gpu_recover("wait fence") && sweet_gpu_fence_done(r->fence)) {
++				ret = kIOReturnSuccess;
++			}
+ 		}
+ 		/*
+ 		 * The client's own output does not reach the console (launchd gives it a stdout nobody

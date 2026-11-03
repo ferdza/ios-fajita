@@ -1,0 +1,30 @@
+diff --git a/bsd/dev/sweet_gpu.c b/bsd/dev/sweet_gpu.c
+index 407ecab..52e2a4f 100644
+--- a/bsd/dev/sweet_gpu.c
++++ b/bsd/dev/sweet_gpu.c
+@@ -556,8 +556,8 @@ static bool gpu_live;
+ static uint32_t gpu_last_fence;
+ static vm_offset_t gpu_pt_blob;      /* where the page tables live */
+ static uint64_t gpu_gmem_pa;         /* GMU-memory blob PA, kept for a zap reload during recovery */
+-static bool gpu_recover_on = true;   /* on by default; boot-arg gpurecover=0 disables the reset */
+-static uint32_t gpu_sctlr_cb = GPU_SCTLR_CB | GPU_SCTLR_HUPCF;  /* HUPCF on by default; gpuhupcf=0 restores the stock SCTLR */
++static bool gpu_recover_on = false;  /* OFF by default: the bare RBBM reset does not revive a630+GMU (device metal7/8); gpurecover=1 to experiment */
++static uint32_t gpu_sctlr_cb = GPU_SCTLR_CB;  /* HUPCF OFF by default: continuing past a fault made 0199 panic on device; gpuhupcf=1 to re-enable */
+ static unsigned gpu_recover_tries;   /* resets attempted this boot; a backstop against a reset loop */
+ #define GPU_RECOVER_MAX 32u          /* past this many resets the GPU is declared lost until reboot */
+ 
+@@ -3157,12 +3157,12 @@ sweet_gpu_probe(void)
+ 
+ 	(void)PE_parse_boot_argn("adreno", &level, sizeof(level));
+ 	{
+-		int rec = 1;	/* on by default; gpurecover=0 disables the reset (see sweet_gpu_recover) */
++		int rec = 0;	/* OFF by default; gpurecover=1 enables the experimental RBBM reset (see sweet_gpu_recover) */
+ 		(void)PE_parse_boot_argn("gpurecover", &rec, sizeof(rec));
+ 		gpu_recover_on = rec != 0;
+ 	}
+ 	{
+-		int hupcf = 1;	/* on by default; gpuhupcf=0 restores the stock SCTLR (no HUPCF) */
++		int hupcf = 0;	/* OFF by default; gpuhupcf=1 re-enables HUPCF (continue-after-fault) */
+ 		(void)PE_parse_boot_argn("gpuhupcf", &hupcf, sizeof(hupcf));
+ 		gpu_sctlr_cb = hupcf ? (GPU_SCTLR_CB | GPU_SCTLR_HUPCF) : GPU_SCTLR_CB;
+ 	}

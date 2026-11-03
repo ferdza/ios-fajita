@@ -6,7 +6,77 @@ hardware table and the plan; this file is the short handoff.
 
 ## State
 
-### NEXT SESSION — start here (2026-10-30): root reflashed; cause of the corruption found
+### NEXT SESSION — start here (2026-11-03): GPU freeze root-caused → 0199 (SMMU HUPCF)
+
+**Where GPU bring-up stands.** The iOS UI renders through Metal; the open problem
+is the freeze on a GPU hang. Two device logs (gpu-metal7, gpu-metal8) pinned it
+down:
+
+- The GPU renders a dozen fences then **hangs on a frame with a GPU IOMMU
+  translation fault**: `smmu cb1 FSR 0x402` (`TF` bit set) on a **wild IOVA
+  `0x14d78_0a8a2c00`** that is in **no BO** (the `GPU FIND` found 0 matches). So
+  it is a bad address in the command stream, not a random lockup.
+- Why it froze (not just dropped a frame): our SMMU GPU context already runs
+  **stall-on-fault OFF** (`SCTLR CFCFG`, bit 7, clear; `FSR` stall-status bit
+  `0x100` was not set), **but HUPCF (bit 8) was clear** → after the fault the
+  SMMU terminated every later access of that context, so the GPU could not
+  retire the batch and wedged (ring drained, GPU busy, fence never posts).
+- **0199 (`0199-fajita-gpu-smmu-hupcf.patch`)** sets HUPCF in `GPU_SCTLR_CB`
+  (`0x00c01067` → `0x00c01167`), matching UniXNU
+  (`NativeAdrenoSmmuContext.cpp`: `stall_on_fault=0, continue_after_fault=1`).
+  On by default; **`gpuhupcf=0`** restores the stock SCTLR. Validated locally
+  (`check-hunk-counts` 199 OK; `xnu-cc.py` 0/1 failed). Committed + pushed; CI
+  grouped build triggered (see the device test log in `docs/gpu-progress.md`).
+- **Recovery (0197) does NOT work on a630+GMU** — the bare `RBBM_SW_RESET` path,
+  even with the recover-v2 GX-rail re-bring-up, **times out on the GMU OOB
+  `boot_slumber` handshake** (`INTR_INFO 0` vs `0x40000000` at boot) → `GPU lost`.
+  No panic, fail-closed held. Still on by default but it is not the real fix.
+
+**Deferred, keep for later (user, 2026-11-03: "garde les autres en mémoire"):**
+- **B — GMU-mediated reset:** replace the bare RBBM reset with a GMU
+  power-collapse + reboot (rpmh), as msm/freedreno `a6xx_recover` does. Only
+  needed for a true lockup; with 0199 a page fault should no longer wedge.
+- **C — wild-address root cause:** find why frame 12/13 references
+  `0x14d78_0a8a2c00`. The ib1/ib2 CP packets are dumped in the gpu-metal8 log;
+  needs a packet-level walk.
+
+**Next concrete step:** test the 0199 kernel on device — does the page fault
+still wedge, or does the GPU retire the batch and keep going? Then decide B/C.
+
+### DIRECTION CHANGE (2026-11-03): move the Metal userspace to Turnip (Vulkan)
+
+A multi-source audit (`docs/gpu-audit-2026-11.md`) concluded the persistent GPU
+fragility is in the **userspace Metal driver**, not the kernel. Every working
+Metal-on-GPU project uses **Metal→Vulkan**; ours is the only one on gallium
+freedreno GL via a bespoke `air_metal.c` (our `Chlorophyll/build-ios.sh` builds
+`-Dvulkan-drivers=` empty — Turnip not built). **Upstream Bergamota/Chlorophyll
+already ported Chlorophyll to Turnip and proved it on the A630** (same SoC/GPU as
+fajita; `tu_smoke` passes, Metal probes pass, 3–4 µs/draw vs gallium 9–17). It
+even explains the "Apple-logo-too-long" stall (pipeline creation under `bg_lock`).
+
+**Progress (2026-11-03):** `0200-fajita-gpu-turnip-params.patch` landed — exposes
+the `MSM_PARAM`s Turnip queries (HIGHEST_BANK_BIT=15, UBWC_SWIZZLE=6,
+MACROTILE_MODE=0, RAYTRACING=0), SDM845 values adopted from Bergamota. Additive,
+compile-checked (xnu-cc 0/1), no change to the gallium path. The remaining Turnip
+adoption is **userspace** and needs the macOS cross-toolchain + device: sync
+Chlorophyll to `origin/ios26` (the Turnip branch; our local is on gallium `main`),
+build Turnip for a630 (`Bergamota/gpu/metal/turnip/build-turnip.sh` +
+`patches/turnip-ios.patch`, Mesa 25.0.7), and port `bgmtl.m` onto `VkCommandBuffer`
+(syncobjs are emulated in the `sweet_drm` shim, so no further kernel change for
+that). Local Turnip assets: `/home/user/ref/Bergamota/gpu/metal/` and Chlorophyll
+`origin/ios26` (fetched).
+
+User chose this direction (2026-11-03). Plan = adopt upstream's T1–T7
+(`Bergamota/gpu/metal/docs/TURNIP.md`): sync Chlorophyll to the `turnip`/`ios26`
+branch, build Turnip for a630, extend the fajita kernel with the syncobj/prime-fd
++ full `MSM_PARAM` set Turnip needs (additive; kernel work is kept), port the
+`bgmtl.m` runtime to record into `VkCommandBuffer`, then drop Gallium. The kernel
+GPU driver (`sweet_gpu.c`) is roughly correct and reused. Stop piling kernel GPU
+patches (0195–0199) for correctness; 0199/HUPCF should stay gated off.
+
+---
+
+### Earlier handoff (2026-10-30): root reflashed; cause of the corruption found
 
 **ROOT CAUSE (proven):** a **stale backup GPT** sat in the last block of `userdata` (block
 0x1B800BA, from an old Linux image; disk GUID `24c8f14c-3f61-a64d-...`). Something on the phone
@@ -4279,3 +4349,40 @@ move is to go back to an image whose journal was never initialised:
 So: keep writing files with the Linux `hfsplus` driver only on a volume whose journal is uninitialised,
 and never derive a working image from one that came back from iOS dirty - the readback → fsck route is
 a trap, not a shortcut.
+
+---
+
+## 2026-11-03 — GPU base re-based onto Bergamota (pinned), fork retired
+
+**Decision (user):** stop treating the `ferdza/chlorophyll` fork as the GPU base.
+Build the driver from **ry-diffusion/Bergamota**'s `gpu/metal/` at a **pinned
+commit**, with one fajita overlay. Rationale: Bergamota is the XNU port for
+beryllium = the **same SDM845/Adreno 630**, already Turnip-integrated, and
+carries the driver + `freedreno-sweet` shim + `renegade` in one tree — so a
+single pin **co-versions** them (no driver↔shim drift). The fork was only a bare
+driver that duplicated integration Bergamota already does.
+
+**Grounding:** at switch time, Bergamota `gpu/metal/{src,air,patches/mesa-26.2}`
+was **byte-identical** to the fork (`diff -rq` = 0), and its
+`turnip/build-turnip.sh` applies the same 6 patches / same Mesa 26.2.5. So the
+switch is structural + reproducibility, not a code change. We take Bergamota's
+**GPU + method + `gpu-abi`**, NOT its kernel (it is on a newer iOS-18/xnu-11215
+line); our `xnu/` stays fajita / iOS 16.7.
+
+**Landed in this repo (`gpu/`):**
+- `gpu/pin.env` — single source of truth: `BERGAMOTA_REF=37a7a7a…` (develop
+  @ 2026-10-26), `MESA_TAG=mesa-26.2.5`, `IOS_DEPLOYMENT_TARGET=16.0`.
+- `gpu/ios16-overlay.sh` — the ONLY fajita delta: sed `version-min=18.0→16.0`
+  across Bergamota `gpu/metal/turnip/*.sh`.
+- `gpu/host-check.sh` — Linux compile-check from the pinned Bergamota tree.
+- `gpu/README.md` — the recipe + rationale.
+- `.github/workflows/turnip.yml` — macOS CI building from Bergamota@pin + overlay;
+  artifact `fajita-turnip-a630-ios16`. Must be on `main` to be dispatchable.
+
+**Bonus references unlocked:** Bergamota `bt18` branch (Bluetooth: `/arm-io/bluetooth`
+ADT node + BlueTool stub) is now a first-class ref for the connectivity plan; its
+`xnu/gpu-abi/` is the spec to align our kernel's Turnip ABI against.
+
+**Next:** confirm `gpu/host-check.sh` green against the pin (running), then this
+repo's `turnip.yml` on `main` supersedes the fork's run. Old fork run
+`41615…`/`41676178463` kept only for macOS-chain signal.
