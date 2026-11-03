@@ -54,6 +54,18 @@ already ported Chlorophyll to Turnip and proved it on the A630** (same SoC/GPU a
 fajita; `tu_smoke` passes, Metal probes pass, 3–4 µs/draw vs gallium 9–17). It
 even explains the "Apple-logo-too-long" stall (pipeline creation under `bg_lock`).
 
+**Progress (2026-11-03):** `0200-fajita-gpu-turnip-params.patch` landed — exposes
+the `MSM_PARAM`s Turnip queries (HIGHEST_BANK_BIT=15, UBWC_SWIZZLE=6,
+MACROTILE_MODE=0, RAYTRACING=0), SDM845 values adopted from Bergamota. Additive,
+compile-checked (xnu-cc 0/1), no change to the gallium path. The remaining Turnip
+adoption is **userspace** and needs the macOS cross-toolchain + device: sync
+Chlorophyll to `origin/ios26` (the Turnip branch; our local is on gallium `main`),
+build Turnip for a630 (`Bergamota/gpu/metal/turnip/build-turnip.sh` +
+`patches/turnip-ios.patch`, Mesa 25.0.7), and port `bgmtl.m` onto `VkCommandBuffer`
+(syncobjs are emulated in the `sweet_drm` shim, so no further kernel change for
+that). Local Turnip assets: `/home/user/ref/Bergamota/gpu/metal/` and Chlorophyll
+`origin/ios26` (fetched).
+
 User chose this direction (2026-11-03). Plan = adopt upstream's T1–T7
 (`Bergamota/gpu/metal/docs/TURNIP.md`): sync Chlorophyll to the `turnip`/`ios26`
 branch, build Turnip for a630, extend the fajita kernel with the syncobj/prime-fd
