@@ -301,6 +301,69 @@ the userspace Metal→ir3→submit path, cross-checked against upstream Mesa fd6
 > read via search summaries and the local Mesa tree rather than fetched directly.
 > Allow that host in the session's network settings to read kernel source inline.
 
+## The architectural finding — Metal→Vulkan→Turnip vs our gallium-ir3 path (2026-11-03)
+
+Broadening past the initial references (other XNU-on-Android ports, the
+nullmoth/1401 NVIDIA-on-macOS driver, press/community notes) surfaced the most
+important result of this whole audit.
+
+**Every working Metal-on-GPU translation uses Metal → Vulkan. We are the only one
+that doesn't.**
+
+| Project | GPU | Metal path | Works |
+| --- | --- | --- | --- |
+| ios-sweet | a740 | Metal → **Vulkan → Turnip** | ✅ |
+| UniXNU | a7xx | Metal → **Vulkan → Turnip** | ✅ |
+| nullmoth/1401 (NVIDIA on macOS) | NVIDIA | Metal → **AIR→SPIR-V → Vulkan (NVK)** | ✅ |
+| **ios-fajita (us)** | a630 | Metal → **AIR→NIR→ir3 → gallium freedreno (GL)** | ✗ fragile |
+
+Evidence for our path: `Chlorophyll/build-ios.sh:29-30` builds
+`-Dgallium-drivers=softpipe,freedreno` with **`-Dvulkan-drivers=` empty** — Turnip
+is **not built**. `libbgair.dylib` is `air_metal.c` doing AIR→NIR→ir3 into the
+gallium freedreno **GL/compute** driver.
+
+Why this matters:
+- **Metal's model is Vulkan's model** — explicit command buffers, descriptor
+  sets, render passes, pipeline barriers. Translating Metal onto Vulkan (Turnip)
+  is a close, almost mechanical mapping. Translating it onto gallium's GL driver
+  through a bespoke `air_metal.c` is an impedance mismatch that must re-create, by
+  hand, the state tracking (including the CCU/UCHE `flush_bits`) that Turnip
+  already does correctly and that msm/Mesa validate on real a6xx hardware.
+- nullmoth confirms the clean shape: translate shaders at the **AIR→SPIR-V**
+  boundary, feed a **near-stock Mesa Vulkan driver**, and patch only the **kernel
+  OS layer** (they replace Linux DRM with an XNU `os-xnu` layer over NVRM). Keep
+  the Mesa driver stock; isolate the OS glue.
+- Turnip fully supports **a630** (it is one of Turnip's original targets), so this
+  is feasible, not speculative.
+
+**Community data point:** press coverage of the ecosystem notes that without
+working GPU acceleration the CPU draws the UI at ~20–30 fps. That "slideshow" is
+the **software-rendering signature**. It is worth confirming on device whether our
+UI is actually GPU-driven end to end or partly falling back to CPU — the
+"powerpoint" may be (partly) software rendering, independent of the kernel GPU
+patches.
+
+### Strategic verdict
+
+- The **kernel** driver (`sweet_gpu.c`, the msm-compatible user client) is roughly
+  correct and is **reusable** — both gallium-freedreno and Turnip speak the same
+  libdrm_freedreno/msm submit ABI, so a Turnip move is **userspace-only** (it may
+  need the kernel to accept a few msm uAPI bits our `submit` currently rejects,
+  e.g. syncobjs).
+- The **userspace Metal translator (Chlorophyll/`air_metal.c` on gallium GL)** is
+  the bespoke, unreferenced, fragile layer and the most likely source of the
+  persistent breakage (wild descriptors, corrupt icons, "powerpoint").
+- **Direction:** stop hardening the kernel for GPU correctness. Evaluate moving
+  the Metal userspace to the proven **Metal→Vulkan→Turnip** path (build Turnip for
+  a630; translate AIR→SPIR-V, as nullmoth does with metal2vulkan, or reuse
+  ios-sweet/UniXNU's Metal-on-Turnip layer). Large effort, but it is the path
+  every working project took, and it leaves our kernel work intact.
+
+> Network note: `hackiosx.dev` and `kernel.googlesource.com` are not resolvable
+> from this session; the ios-sweet/UniXNU Turnip detail comes from search
+> summaries and the nullmoth docs, not direct fetches. Allow those hosts to verify
+> inline.
+
 ## Open questions for the maintainer
 
 - Phase 2: prefer **(a) cacheable + ranged clean** (less churn, closest to the
