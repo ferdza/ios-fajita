@@ -23,6 +23,11 @@ rendering on the OnePlus 6T, `fajita`).
 
 ## GPU / Metal (current focus)
 
+- **[../gpu/README.md](../gpu/README.md)** — **how the GPU driver is built: from
+  ry-diffusion/Bergamota's `gpu/metal/` at a pinned commit (not a fork)**, with
+  one fajita overlay (iOS target 18→16). The pin (`../gpu/pin.env`), the overlay,
+  the Linux `host-check.sh` and the macOS CI (`turnip.yml`) all live under
+  [`../gpu/`](../gpu/README.md). Read this before touching the driver build.
 - **[gpu-progress.md](gpu-progress.md)** — living status log: the 0193–0198 patch
   series (what each does and its state), findings, open questions to confirm on
   device, the long-term direction, and the **device test log**.

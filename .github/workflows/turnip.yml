@@ -1,0 +1,94 @@
+name: turnip
+
+# Build the fajita GPU driver (Metal->Vulkan->Turnip) for iOS arm64e on a macOS
+# runner, so it can be built without a local Mac. The driver is NOT forked here:
+# it is built from ry-diffusion/Bergamota's gpu/metal/ at the commit pinned in
+# gpu/pin.env (driver + freedreno-sweet libdrm shim + renegade, co-versioned),
+# with gpu/ios16-overlay.sh as the only fajita delta (deployment target 18->16
+# for iOS 16.7.16). Produces the installable driver + probes as an artifact.
+#
+# Validate locally first with gpu/host-check.sh (Linux, no Mac) so CI is not
+# wasted. macOS runner minutes are ~10x, so this is workflow_dispatch only.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: macOS runner label
+        default: "macos-15"
+
+concurrency:
+  group: turnip-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'macos-15' }}
+    steps:
+      - name: Checkout ios-fajita (gpu/ overlay + pin)
+        uses: actions/checkout@v4
+
+      - name: Read the Bergamota pin (single source of truth)
+        run: cat gpu/pin.env >> "$GITHUB_ENV"
+
+      - name: Checkout Bergamota @ pin (driver + freedreno-sweet + renegade)
+        uses: actions/checkout@v4
+        with:
+          repository: ry-diffusion/Bergamota
+          ref: ${{ env.BERGAMOTA_REF }}
+          path: bergamota
+
+      - name: Host tools (bison, glslang, meson/mako/pyyaml)
+        run: |
+          brew install bison glslang
+          python3 -m venv "$GITHUB_WORKSPACE/work/venv"
+          "$GITHUB_WORKSPACE/work/venv/bin/pip" install -q mako pyyaml meson ninja
+
+      - name: Build renegade (PAC strip + ad-hoc sign)
+        run: |
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          command -v cargo >/dev/null || { curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable; source "$HOME/.cargo/env"; }
+          cargo --version
+          cargo build --release --manifest-path bergamota/tools/renegade-rs/Cargo.toml
+          mkdir -p bergamota/tools/renegade
+          cp bergamota/tools/renegade-rs/target/release/renegade bergamota/tools/renegade/renegade
+          chmod +x bergamota/tools/renegade/renegade
+
+      - name: Apply the fajita iOS-16 overlay (the only delta)
+        run: gpu/ios16-overlay.sh "$GITHUB_WORKSPACE/bergamota"
+
+      - name: libdrm 2.4.124 source (headers for the .pc include paths)
+        run: git clone -q --depth 1 --branch libdrm-2.4.124 https://gitlab.freedesktop.org/mesa/drm.git "$GITHUB_WORKSPACE/work/libdrm-src"
+
+      - name: Build Turnip (${{ env.MESA_TAG }} + patches) for a630 / iOS arm64e
+        working-directory: bergamota/gpu/metal
+        env:
+          GPU_METAL_WORK: ${{ github.workspace }}/work
+          BERGAMOTA_GPU: ${{ github.workspace }}/bergamota/gpu
+          GPU_EAGL_LIBDRM: ${{ github.workspace }}/work/libdrm-src
+          GPU_EAGL_VENV: ${{ github.workspace }}/work/venv
+        run: bash turnip/build-turnip.sh
+
+      - name: Build the Metal driver + probes on Turnip
+        working-directory: bergamota/gpu/metal
+        env:
+          GPU_METAL_WORK: ${{ github.workspace }}/work
+          BERGAMOTA_GPU: ${{ github.workspace }}/bergamota/gpu
+        run: bash turnip/build-metal.sh "$GITHUB_WORKSPACE/out"
+
+      - name: Collect the installable driver
+        run: |
+          mkdir -p dist
+          cp -f work/mesa-turnip26/build-ios/src/freedreno/vulkan/libchlorophyll.dylib dist/ 2>/dev/null || true
+          cp -f out/libchlorophyll.dylib out/libdrm.2.dylib out/bgmtl.o dist/ 2>/dev/null || true
+          cp -f out/*.metallib dist/ 2>/dev/null || true
+          ls -l dist out || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fajita-turnip-a630-ios16
+          path: |
+            dist
+            out
+          if-no-files-found: warn

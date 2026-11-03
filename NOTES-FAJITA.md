@@ -4349,3 +4349,40 @@ move is to go back to an image whose journal was never initialised:
 So: keep writing files with the Linux `hfsplus` driver only on a volume whose journal is uninitialised,
 and never derive a working image from one that came back from iOS dirty - the readback → fsck route is
 a trap, not a shortcut.
+
+---
+
+## 2026-11-03 — GPU base re-based onto Bergamota (pinned), fork retired
+
+**Decision (user):** stop treating the `ferdza/chlorophyll` fork as the GPU base.
+Build the driver from **ry-diffusion/Bergamota**'s `gpu/metal/` at a **pinned
+commit**, with one fajita overlay. Rationale: Bergamota is the XNU port for
+beryllium = the **same SDM845/Adreno 630**, already Turnip-integrated, and
+carries the driver + `freedreno-sweet` shim + `renegade` in one tree — so a
+single pin **co-versions** them (no driver↔shim drift). The fork was only a bare
+driver that duplicated integration Bergamota already does.
+
+**Grounding:** at switch time, Bergamota `gpu/metal/{src,air,patches/mesa-26.2}`
+was **byte-identical** to the fork (`diff -rq` = 0), and its
+`turnip/build-turnip.sh` applies the same 6 patches / same Mesa 26.2.5. So the
+switch is structural + reproducibility, not a code change. We take Bergamota's
+**GPU + method + `gpu-abi`**, NOT its kernel (it is on a newer iOS-18/xnu-11215
+line); our `xnu/` stays fajita / iOS 16.7.
+
+**Landed in this repo (`gpu/`):**
+- `gpu/pin.env` — single source of truth: `BERGAMOTA_REF=37a7a7a…` (develop
+  @ 2026-10-26), `MESA_TAG=mesa-26.2.5`, `IOS_DEPLOYMENT_TARGET=16.0`.
+- `gpu/ios16-overlay.sh` — the ONLY fajita delta: sed `version-min=18.0→16.0`
+  across Bergamota `gpu/metal/turnip/*.sh`.
+- `gpu/host-check.sh` — Linux compile-check from the pinned Bergamota tree.
+- `gpu/README.md` — the recipe + rationale.
+- `.github/workflows/turnip.yml` — macOS CI building from Bergamota@pin + overlay;
+  artifact `fajita-turnip-a630-ios16`. Must be on `main` to be dispatchable.
+
+**Bonus references unlocked:** Bergamota `bt18` branch (Bluetooth: `/arm-io/bluetooth`
+ADT node + BlueTool stub) is now a first-class ref for the connectivity plan; its
+`xnu/gpu-abi/` is the spec to align our kernel's Turnip ABI against.
+
+**Next:** confirm `gpu/host-check.sh` green against the pin (running), then this
+repo's `turnip.yml` on `main` supersedes the fork's run. Old fork run
+`41615…`/`41676178463` kept only for macOS-chain signal.

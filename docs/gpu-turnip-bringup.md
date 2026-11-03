@@ -5,6 +5,17 @@ to **Turnip** (Vulkan), the path every working Metal-on-Adreno project uses and
 the one upstream Chlorophyll already proved on the A630. See
 [`gpu-audit-2026-11.md`](gpu-audit-2026-11.md) for why.
 
+> **Base change (2026-11-03): built from Bergamota, pinned — not a fork.** The
+> driver is no longer maintained as the `ferdza/chlorophyll` fork. It is built
+> from **ry-diffusion/Bergamota**'s `gpu/metal/` at the commit pinned in
+> [`../gpu/pin.env`](../gpu/pin.env), with one fajita overlay (iOS target 18→16).
+> Bergamota is the XNU port for **beryllium = the same SDM845/Adreno 630**, so it
+> co-versions the driver, the `freedreno-sweet` shim and `renegade` from one
+> tree. The recipe, overlay, local check and CI now live in
+> [`../gpu/`](../gpu/README.md). We take Bergamota's **GPU + method + `gpu-abi`**,
+> not its kernel (it is on a newer iOS-18/xnu-11215 line); our `xnu/` stays
+> fajita/16.7.
+
 **Status (2026-11-03):**
 - Driver: **done upstream and on your GitHub** — `ferdza/chlorophyll`. The iOS-26
   line is branch `ios26` (`d3cb665`); the **iOS-16.7 adaptation for fajita is
@@ -28,36 +39,38 @@ the one upstream Chlorophyll already proved on the A630. See
 
 ## Build via GitHub CI — no Mac needed
 
-`ferdza/chlorophyll` has a macOS Actions workflow, **`.github/workflows/turnip.yml`**
-(listed on `main`, run it against `fajita`). It checks out Bergamota for the
-`freedreno-sweet` libdrm stand-in, builds the `renegade` PAC-strip tool, lowers
-the shim's target to 16.0, clones Mesa 26.2.5, runs `turnip/build-turnip.sh` +
-`build-metal.sh`, and uploads the driver (`libchlorophyll.dylib`, `libdrm.2.dylib`,
-`bgmtl.o`, metallibs) as an artifact you download and install.
+**`ios-fajita/.github/workflows/turnip.yml`** (this repo) is the canonical build.
+It checks out Bergamota at the pinned commit (`gpu/pin.env`), builds `renegade`,
+applies the fajita overlay (`gpu/ios16-overlay.sh`, target 18→16), clones Mesa
+26.2.5, runs Bergamota's `gpu/metal/turnip/build-turnip.sh` + `build-metal.sh`,
+and uploads the driver (`libchlorophyll.dylib`, `libdrm.2.dylib`, `bgmtl.o`,
+metallibs) as artifact `fajita-turnip-a630-ios16`.
 
 ```sh
-gh workflow run turnip.yml -R ferdza/chlorophyll --ref fajita
-gh run watch <id> -R ferdza/chlorophyll
-gh run download <id> -R ferdza/chlorophyll -n chlorophyll-turnip-a630-ios16
+gh workflow run turnip.yml -R <owner>/ios-fajita
+gh run watch <id> -R <owner>/ios-fajita
+gh run download <id> -R <owner>/ios-fajita -n fajita-turnip-a630-ios16
 ```
 
-macOS runner minutes are ~10x, so it is `workflow_dispatch` only. It is a young
-workflow and may need a debug run or two (the first failed on the renegade step,
-now fixed).
+macOS runner minutes are ~10x, so it is `workflow_dispatch` only. `turnip.yml`
+must be on the default branch (`main`) to be dispatchable. (The retired
+`ferdza/chlorophyll@fajita` workflow built the same driver from the fork; it is
+superseded by this one and kept only for history.)
 
 ## Local compile-check — no Mac, no CI (save minutes)
 
-**`turnip/host-check.sh`** in `ferdza/chlorophyll` compiles the bug-prone part of
-the port on a plain **Linux** host (Mesa 26.2.5 + our patches + the AIR frontend +
-ir3 + Turnip + gallium freedreno) in minutes, catching broken patches and compile
-errors before a macOS CI run — the Chlorophyll analogue of the kernel's
-`tools/xnu-cc.py`. Proven green. It does **not** cover the iOS-only `bgmtl.m` /
-`chl_vk.c` / arm64e link, which still need the Mac build or CI.
+**`ios-fajita/gpu/host-check.sh`** (this repo) compiles the bug-prone part of the
+driver on a plain **Linux** host, building from the **pinned Bergamota tree**
+(Mesa 26.2.5 + the 6 patches + the AIR frontend + ir3 + Turnip + gallium
+freedreno) in minutes — the analogue of the kernel's `tools/xnu-cc.py`. It does
+**not** cover the iOS-only `bgmtl.m` / `chl_vk.c` / arm64e link, which still need
+the macOS CI.
 
 ```sh
 # Linux deps: meson ninja python3-mako flex bison glslang-tools spirv-tools \
 #             libdrm-dev libzstd-dev zlib1g-dev pkg-config
-turnip/host-check.sh      # clones Mesa 26.2.5 on first run; PASS/FAIL in minutes
+gpu/host-check.sh                              # clones Bergamota@pin + Mesa
+BERGAMOTA=/path/to/bergamota gpu/host-check.sh # reuse a local Bergamota checkout
 ```
 
 Workflow: edit the driver → `host-check.sh` until green → only then dispatch the
