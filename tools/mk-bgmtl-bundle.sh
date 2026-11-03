@@ -11,7 +11,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK=${IOS_SDK:-$HOME/theos/sdks/iPhoneOS16.5.sdk}
-CHL=${CHLOROPHYLL:-$HOME/ref/Chlorophyll}
+# source now comes from Bergamota's embedded driver (gpu/metal), not the removed fork
+CHL=${CHLOROPHYLL:-$HOME/ref/Bergamota/gpu/metal}
 OUT=${1:-$HOME/ios-userland/SweetBGMTL.bundle}
 BG=${BGAIR:-$HOME/mesa-ios-build/mesa/build-ios/src/gallium/drivers/freedreno/libbgair.dylib}
 # Copies with the install names they have on the device (/usr/local/lib): linking the bundle against

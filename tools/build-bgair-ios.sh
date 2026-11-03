@@ -1,4 +1,11 @@
 #!/bin/bash
+# SUPERSEDED (2026-11-03) - the gallium path. The GPU driver now builds from
+# ry-diffusion/Bergamota's gpu/metal/ (Turnip, Mesa 26.2.5) at a pinned commit:
+# see ../gpu/README.md, ../gpu/host-check.sh and ../.github/workflows/turnip.yml.
+# This script builds the OLD gallium libbgair.dylib (AIR -> NIR -> ir3, Mesa
+# 25.0.7) and is kept only to rebuild the legacy on-device driver. Do not use it
+# for new work.
+#
 # Build Chlorophyll's libbgair.dylib (AIR -> NIR -> ir3) for iOS arm64 from Linux.
 #
 #   tools/build-bgair-ios.sh [WORKDIR]        default WORKDIR: ~/mesa-ios-build

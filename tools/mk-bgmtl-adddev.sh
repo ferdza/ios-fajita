@@ -4,7 +4,8 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SDK=${IOS_SDK:-$HOME/theos/sdks/iPhoneOS16.5.sdk}
-CHL=${CHLOROPHYLL:-$HOME/ref/Chlorophyll}
+# source now comes from Bergamota's embedded driver (gpu/metal), not the removed fork
+CHL=${CHLOROPHYLL:-$HOME/ref/Bergamota/gpu/metal}
 OUT=${1:-$HOME/ios-userland/bgmtl}
 BG=$HOME/mesa-25.0.7/build-ios/src/gallium/drivers/freedreno/libbgair.dylib
 CC="clang --target=arm64-apple-ios16.0 -isysroot $SDK -O1 -fno-objc-arc -Wall -Wno-deprecated-declarations -fuse-ld=lld -L $SDK/usr/lib -lSystem"

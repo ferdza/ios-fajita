@@ -1,5 +1,12 @@
 # Building Chlorophyll's userspace for this port (Linux, no Mac)
 
+> **SUPERSEDED (2026-11-03) — the gallium path.** The GPU driver now builds from
+> ry-diffusion/Bergamota's `gpu/metal/` (Turnip, Mesa **26.2.5**) at a pinned
+> commit. Use [`../../gpu/README.md`](../../gpu/README.md) + `gpu/host-check.sh`
+> (Linux) + `.github/workflows/turnip.yml` (macOS CI). This page documents the
+> old `libbgair` gallium build (Mesa **25.0.7**, AIR→NIR→ir3), kept only to
+> rebuild the legacy on-device driver.
+
 `tools/build-bgair-ios.sh` produces `libbgair.dylib` - the AIR -> NIR -> ir3 device half - from
 Linux with our clang + the iPhoneOS 16.5 SDK. It was learned by iterating on the real build; every
 item below is a failure that had to be fixed, not a preference.
