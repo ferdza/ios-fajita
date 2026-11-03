@@ -240,6 +240,67 @@ gives per-change signal without per-change builds.
 
 ---
 
+## Multi-source cross-check + source quality (2026-11-03, later)
+
+Rather than lean on one reference, the per-submission cache question was checked
+against several sources, and their reliability **for a630 specifically** rated.
+
+### Source quality for a630
+
+| Source | Gen | Reliability for a630 | Note |
+| --- | --- | --- | --- |
+| **msm `a6xx_gpu.c` + `a6xx.xml`** (Linux) | a6xx | ⭐⭐⭐ authoritative | ships on millions of SD845-class phones; the semantic reference, but Linux not XNU |
+| **Mesa freedreno (fd6) + Turnip** | a6xx | ⭐⭐⭐ production | **this is our userspace** (Chlorophyll vendors upstream Mesa) |
+| Mesa docs / release notes / Turnip DeepWiki | a6xx | ⭐⭐ background | cache-role descriptions; some pages old |
+| **UniXNU/Adreno740** | **a7xx** | ⭐ method only | the only other Adreno-on-XNU, but **event numbers differ** (e.g. event `0x31` = CACHE_CLEAN on a7xx, CACHE_INVALIDATE on a6xx). Do **not** copy its constants. |
+| Snapintosh | a8xx | ⭐ further still | macOS 27 research |
+
+Rule reaffirmed (AGENTS.md): re-verify every hardware constant against an a6xx
+source; a7xx/a8xx are for method, not numbers.
+
+### What the cross-check established
+
+- **Cache maintenance (CCU *and* UCHE flush/invalidate) is a userspace
+  command-stream responsibility**, not the kernel's. Mesa/Turnip track
+  `flush_bits` (CCU clean/invalidate color+depth, UCHE clean/invalidate) in
+  command-buffer state and emit them via `tu_emit_cache_flush()` / the fd6
+  equivalent at render-pass boundaries and attachment-role switches. (Mesa docs;
+  Turnip `tu_cmd_buffer`; DeepWiki.)
+- The **kernel** `a6xx_submit` only invalidates **CCU** depth/color at the start
+  and emits **CACHE_FLUSH_TS** at the end, as a cross-submission safety net.
+- **Our kernel `sweet_gpu_submit` already matches that** (CCU invalidate depth +
+  color, IBs, CACHE_FLUSH_TS). So the earlier "the kernel is missing a UCHE
+  invalidate" idea (extrapolated from UniXNU's a7xx ring) is **the wrong layer** —
+  the kernel is not where per-submit UCHE invalidation belongs.
+- Therefore a stale-descriptor / wild-address bug most likely lives in the
+  **userspace Metal path**: `bgmtl.m` → the `rwa_*` layer → Mesa fd6 batch →
+  `sweet_drm` GEM_SUBMIT. That path is the **most bespoke, least-validated** part
+  of the whole stack — there is **no production "Metal-on-Adreno" reference
+  anywhere** (msm/Turnip are GL/Vulkan), so it has never been cross-checked
+  against a known-good implementation. `bgmtl.m:1284` even notes a cache clean was
+  *removed* as an optimization ("the CPU never touches them … each was a kernel
+  [round-trip]") — exactly the kind of shortcut that yields stale GPU reads.
+
+### Verdict on "should we swap the driver?"
+
+- The **kernel** driver (`sweet_gpu.c` submit/ring/fence) is roughly correct and
+  matches msm's shape — **not** the thing to throw away; the 0195–0199 churn was
+  mostly fighting symptoms in the wrong place.
+- The **userspace Metal shim** is the fragile, unreferenced layer. It cannot be
+  "replaced with another driver" because nobody else maps Metal onto Adreno; the
+  realistic move is to **audit its cache-flush and descriptor emission against
+  upstream Mesa fd6** (which we vendor and which *is* production), i.e. check that
+  `rwa_*`/`bgmtl.m` emit the same `flush_bits` fd6 would, and that the removed
+  cache clean at `bgmtl.m:1284` is not the stale-read source.
+
+Net: **stop patching the kernel for this class of bug.** Next effort belongs in
+the userspace Metal→ir3→submit path, cross-checked against upstream Mesa fd6.
+
+> Network note: `kernel.googlesource.com` is not resolvable from this session
+> (outside the allowed network domains), so the kernel `a6xx_submit` body was
+> read via search summaries and the local Mesa tree rather than fetched directly.
+> Allow that host in the session's network settings to read kernel source inline.
+
 ## Open questions for the maintainer
 
 - Phase 2: prefer **(a) cacheable + ranged clean** (less churn, closest to the
