@@ -17,17 +17,18 @@ the one upstream Chlorophyll already proved on the A630. See
 > fajita/16.7.
 
 **Status (2026-11-03):**
-- Driver: **done upstream and on your GitHub** — `ferdza/chlorophyll`. The iOS-26
-  line is branch `ios26` (`d3cb665`); the **iOS-16.7 adaptation for fajita is
-  branch `fajita`** (lower deployment target + CI + the host compile-check).
-  Turnip runtime `air/chl_vk.c` (~100 KB), AIR→NIR for Vulkan `air/air_nir_vk.c`,
-  Metal device `src/bgmtl.m`, build scripts under `turnip/`. `tu_smoke` and the
-  Metal probes pass on the A630 (Bergamota boot-54/55 logs).
-- iOS 16.7 fix (branch `fajita`): `ios26` built everything at
-  `-miphoneos-version-min=18.0`, which **will not load on iOS 16.7** (dyld
-  rejects a min-OS-18 dylib). Lowered to **16.0** across the build/test scripts.
-  The iOS-26 specifics in `bgmtl.m` are inert on 16.7 (they only answer the
-  `supportsMTL4*` queries with NO; no iOS-18-only API is called).
+- Driver: **built from Bergamota `gpu/metal/` at the pinned commit** (see
+  [`../gpu/pin.env`](../gpu/pin.env) and [`../gpu/README.md`](../gpu/README.md)) —
+  not a fork. Turnip runtime `air/chl_vk.c` (~100 KB), AIR→NIR for Vulkan
+  `air/air_nir_vk.c`, Metal device `src/bgmtl.m`, build scripts under
+  `gpu/metal/turnip/`. `tu_smoke` and the Metal probes pass on the A630 (Bergamota
+  boot-54/55 logs).
+- iOS 16.7 overlay ([`../gpu/ios16-overlay.sh`](../gpu/ios16-overlay.sh)):
+  Bergamota builds everything at `-miphoneos-version-min=18.0`, which **will not
+  load on iOS 16.7** (dyld rejects a min-OS-18 dylib). Lowered to **16.0** across
+  the build scripts — the only fajita source delta. The iOS-18/26 specifics in
+  `bgmtl.m` are inert on 16.7 (they only answer the `supportsMTL4*` queries with
+  NO; no newer API is called).
 - Kernel (fajita): **ready** — all selectors the Turnip shim uses are
   implemented, and `0200-fajita-gpu-turnip-params.patch` exposes the `MSM_PARAM`s
   Turnip queries (HIGHEST_BANK_BIT=15, UBWC_SWIZZLE=6, MACROTILE_MODE=0). Syncobjs
@@ -53,9 +54,9 @@ gh run download <id> -R <owner>/ios-fajita -n fajita-turnip-a630-ios16
 ```
 
 macOS runner minutes are ~10x, so it is `workflow_dispatch` only. `turnip.yml`
-must be on the default branch (`main`) to be dispatchable. (The retired
-`ferdza/chlorophyll@fajita` workflow built the same driver from the fork; it is
-superseded by this one and kept only for history.)
+must be on the default branch (`main`) to be dispatchable. (An earlier workflow
+on the `ferdza/chlorophyll` fork built the same driver; that fork has since been
+removed and this workflow supersedes it.)
 
 ## Local compile-check — no Mac, no CI (save minutes)
 
@@ -79,9 +80,9 @@ macOS CI → download the artifact → install on the device.
 ## What runs where
 
 ```
-iOS app / CoreAnimation  ──AIR──►  Chlorophyll (ferdza/chlorophyll@ios26)
+iOS app / CoreAnimation  ──AIR──►  driver (Bergamota gpu/metal @ pin.env)
                                      ├─ air/  AIR → NIR  (air_nir_vk.c)
-                                     ├─ Turnip (Mesa 25.0.7 + turnip-ios.patch)  NIR → a630
+                                     ├─ Turnip (Mesa 26.2.5 + turnip-ios.patch)  NIR → a630
                                      └─ src/bgmtl.m  MTLDevice/encoder → VkCommandBuffer
                                           │ libdrm stand-in (Bergamota freedreno-sweet/sweet_drm.c)
                                           ▼  IOConnect… (msm ABI, syncobjs emulated)
@@ -139,8 +140,8 @@ after the logo.
 
 ## Pointers
 
-- Driver + full port write-up: `ferdza/chlorophyll@ios26`, `docs/TURNIP.md`
-  (phases T1–T7, phone results), `docs/FIXES.md`.
+- Driver + full port write-up: Bergamota `gpu/metal/` (at the pinned commit),
+  `gpu/metal/docs/TURNIP.md` (phases T1–T7, phone results), `docs/FIXES.md`.
 - Shim / libdrm stand-in: Bergamota `gpu/freedreno-sweet/sweet_drm.c`.
 - Native kernel backend (optional, later): UniXNU `tu_knl_darwin.cc` is the
   template for a `tu_knl_sweet.cc` that calls `SweetAdrenoUserClient` directly.

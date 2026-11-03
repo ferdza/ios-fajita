@@ -32,9 +32,10 @@ rendering on the OnePlus 6T, `fajita`).
   series (what each does and its state), findings, open questions to confirm on
   device, the long-term direction, and the **device test log**.
 - **[gpu-turnip-bringup.md](gpu-turnip-bringup.md)** — **the Turnip (Vulkan) Metal
-  driver bring-up recipe**: the driver is done on `ferdza/chlorophyll@ios26`, the
-  fajita kernel is ready (selectors + `0200` params); this is the macOS build +
-  device install + boot-args to run it on fajita.
+  driver bring-up recipe**: the driver is built from Bergamota `gpu/metal/` at a
+  pinned commit (see [`../gpu/README.md`](../gpu/README.md)), the fajita kernel is
+  ready (selectors + `0200` params); this is the macOS build + device install +
+  boot-args to run it on fajita.
 - **[gpu-audit-2026-11.md](gpu-audit-2026-11.md)** — **step-back audit (2026-11-03)**
   after the 0199 panic. Conclusions (see "What still holds"): **HUPCF (0199)
   caused the panic — gate it off**; the hang is a **shader faulting on a garbage
@@ -80,11 +81,14 @@ rendering on the OnePlus 6T, `fajita`).
 
 ---
 
-**Status (2026-11-03):** the iOS UI is rendered by the GPU through Metal. Current
-work is **performance** (0195 write-combined buffers, 0198 asynchronous submit)
-and **freezes**. Device testing (gpu-metal8) root-caused the freeze to a **GPU
-IOMMU page fault** that wedged the GPU because the SMMU context lacked **HUPCF**
-(continue-after-fault) → **0199** sets it (matching UniXNU). The bare-RBBM
-recovery (0197) does **not** revive a630+GMU on device; a GMU-mediated reset is
-deferred ("B"), as is the root cause of the wild fault address ("C"). Details and
-the device test log in [gpu-progress.md](gpu-progress.md).
+**Status (2026-11-03):** the iOS UI is rendered by the GPU through Metal, but the
+first gallium-ir3 path is slow and fragile — device testing (gpu-metal8)
+root-caused the freeze to a **shader faulting on a bad descriptor** (a wild IOVA),
+and the **0199** SMMU continue-after-fault (HUPCF) experiment **panicked the
+kernel on device**. So recovery and HUPCF are now **off by default** (**0201**),
+and the strategic direction is the **Turnip (Metal → Vulkan → a630)** pivot —
+driver built from Bergamota `gpu/metal/` at a pinned commit
+([`../gpu/README.md`](../gpu/README.md)), kernel already Turnip-ready (`0200`). The
+GMU-mediated reset ("B") and the wild-address root cause ("C") are kept for later.
+Details and the device test log in [gpu-progress.md](gpu-progress.md); the pivot
+reasoning in [gpu-audit-2026-11.md](gpu-audit-2026-11.md).

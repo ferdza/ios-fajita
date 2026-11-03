@@ -56,8 +56,8 @@ it can be checked on this Linux box in seconds.
 
 - **The tools:** kernel → `tools/xnu-cc.py <ci.log> <buildtree> <source-substring>`
   (system clang, no macOS) and `tools/check-hunk-counts.py xnu/patches`. GPU
-  driver → `ferdza/chlorophyll`'s `turnip/host-check.sh` (compiles Turnip + the
-  AIR frontend + ir3 on Linux).
+  driver → `gpu/host-check.sh` (compiles Turnip + the AIR frontend + ir3 on Linux
+  from the pinned Bergamota tree).
 - **What it cost us:** a CI run died on the `renegade` step; building it locally
   (55 s) showed the code was fine and the runner's environment was the problem —
   a diagnosis that would have cost several macOS runs if done by re-triggering CI.

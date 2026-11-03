@@ -8,10 +8,15 @@ iOS 16.7.16 (20H392) userland of the iPhone X**: launchd, the system daemons, ba
 SpringBoard and the stock apps.
 
 The phone boots to the **iOS home screen** — unlock, touchscreen and hardware buttons all
-work — and the interface is now **drawn by the Adreno 630 through Metal**: CoreAnimation
-renders on the GPU via Chlorophyll (Mesa/freedreno ir3 dressed as an Apple Metal driver) over
-the kernel's msm-compatible IOKit user client. The current work is **performance and hang
-recovery** of that GPU path (see [`docs/gpu-progress.md`](docs/gpu-progress.md)).
+work — and the interface is **drawn by the Adreno 630 through Metal**: CoreAnimation renders
+on the GPU over the kernel's msm-compatible IOKit user client. The GPU driver is moving from
+the first gallium-ir3 bring-up to **Turnip (Metal → Vulkan → a630)**, the path every working
+Metal-on-Adreno project uses; the driver is built from
+[Bergamota](https://github.com/ry-diffusion/Bergamota)'s `gpu/metal/` at a pinned commit (see
+[`gpu/README.md`](gpu/README.md)) and the kernel is already Turnip-ready. Current work is that
+GPU pivot and the first connectivity driver (see
+[`docs/gpu-turnip-bringup.md`](docs/gpu-turnip-bringup.md) and
+[`docs/connectivity-research.md`](docs/connectivity-research.md)).
 
 > Experimental bring-up, not a usable phone OS. Wi-Fi, Bluetooth, the modem and the camera
 > are not there yet, Apple's security model is mostly switched off, and the iOS root lives in
@@ -26,34 +31,41 @@ recovery** of that GPU path (see [`docs/gpu-progress.md`](docs/gpu-progress.md))
 | Storage | Own UFS host driver; the iOS root is a journaled HFS+ volume inside `userdata` |
 | iOS userland | Real iPhone X 16.7.16 root filesystem and shared cache; launchd and the system daemons run (hundreds of processes) |
 | Display | Kernel IOSurface + IOMobileFramebuffer (`AppleCLCD`) services, presented as an iPhone X panel |
-| **GPU / Metal** | **Adreno 630 renders the UI**: full kernel bring-up (power, clocks, GMU firmware + HFI, SMMU, signed zap, command processor, buffers, fences, IOKit user client) plus the Chlorophyll Metal driver. CoreAnimation composites on the GPU |
+| **GPU / Metal** | **Adreno 630 renders the UI**: full kernel bring-up (power, clocks, GMU firmware + HFI, SMMU, signed zap, command processor, buffers, fences, IOKit user client) plus the Metal driver. CoreAnimation composites on the GPU. Driver is moving to **Turnip** (Vulkan), built from Bergamota pinned ([`gpu/`](gpu/README.md)) |
 | GUI | backboardd, SpringBoard, lock screen, home screen, Control Center, notification centre, Settings |
 | Touch | RMI4 over I²C (`0x20`, SE `0xa90000`) with rail enable; delivered as HID digitizer events |
 | Buttons | Power and volume up/down (PM8998 through SPMI, usages `0x30`/`0xe9`/`0xea`) |
 | Device identity | iPhone X (`iPhone10,3` / D22) so UIKit picks the gesture UI |
 | Logging | Persistent ring buffer in `userdata` plus a panic flush; pulled over OrangeFox (`tools/sweet-log-pull.sh`) |
 
-## Current focus: GPU performance & stability
+## Current focus: the Turnip pivot & first connectivity
 
-The UI renders on the GPU, but two problems are being worked (series 0193–0198, see
-[`docs/gpu-progress.md`](docs/gpu-progress.md)):
+The UI renders on the GPU today through the first gallium-ir3 driver, but that path is slow
+and fragile (a shader faulting on a bad descriptor wedged the GPU, and the `0199` SMMU
+continue-after-fault experiment panicked the kernel on device). A step-back audit concluded
+every *working* Metal-on-Adreno stack routes through **Vulkan/Turnip**, and Bergamota already
+proved Turnip on this exact A630 — so the direction is **Metal → Vulkan → Turnip**:
 
-- **Speed.** The Metal submit path no longer drains the ring to idle on every frame
-  (0198, async submit) and ordinary buffers are write-combined instead of per-line flushed
-  (0195). This removes the CPU↔GPU serialization behind the earlier low frame rate (the UI
-  ran at only a few frames per second).
-- **Freezes.** A wedged command processor used to busy-wait 100 s and never recover. The
-  drain wait is now capped (0196) and a **hang-recovery** path resets the GPU core and lets
-  the client resubmit (0197, on by default; `gpurecover=0` disables).
+- **GPU.** The Turnip driver is built from Bergamota's `gpu/metal/` at a pinned commit
+  ([`gpu/README.md`](gpu/README.md)); the kernel is already Turnip-ready (`0200` exposes the
+  `MSM_PARAM`s Turnip queries). GPU recovery and SMMU HUPCF are now **off by default**
+  (`0201`) after the `0199` panic. See [`docs/gpu-turnip-bringup.md`](docs/gpu-turnip-bringup.md)
+  and the reasoning in [`docs/gpu-audit-2026-11.md`](docs/gpu-audit-2026-11.md).
+- **Connectivity.** No radios work yet. The plan is **USB host → a USB Wi-Fi/Ethernet dongle
+  → a `utun` interface** first (reuses the working CDC-ECM networking, skips both the modem
+  stack and Apple's closed 802.11 family), with native WCN3990 Wi-Fi as a later two-stage
+  effort. See [`docs/connectivity-research.md`](docs/connectivity-research.md).
 
-How our code compares to the other XNU-on-Adreno efforts, and what each patch changes, is in
-[`docs/gpu-reference-audit.md`](docs/gpu-reference-audit.md).
+What each GPU patch changes and how the code compares to the other XNU-on-Adreno efforts is in
+[`docs/gpu-reference-audit.md`](docs/gpu-reference-audit.md); the coding rules the project
+holds itself to are in [`docs/coding-practices.md`](docs/coding-practices.md).
 
 ## What does not work (yet)
 
-- **Wi-Fi / Bluetooth / modem / camera**: no drivers.
-- **Wallpaper (PosterBoard)** and a few graphical glitches: under investigation (likely
-  cacheable-surface coherency — see the audit).
+- **Wi-Fi / Bluetooth / modem / camera**: no drivers yet. The connectivity plan (USB-dongle
+  first, native WCN3990 later) is in [`docs/connectivity-research.md`](docs/connectivity-research.md).
+- **Wallpaper (PosterBoard)** and a few graphical glitches: under investigation; expected to
+  be reworked with the Turnip driver rather than patched on the gallium path.
 - **Time**: the clock starts at 1969, so anything checking certificates (TLS, activation)
   sees an invalid date.
 - **Apple security**: AMFI, sandbox and code signing are permissive stand-ins. Do not treat
@@ -144,7 +156,12 @@ panic happened during a flush.
 The kernel bring-up follows the ladder of HackiOS (`oosexgang`) and Bergamota (`ry-diffusion`),
 which run the same SDM845/Adreno 630. Boot arguments select how far it goes: `adreno=1..9`,
 `zap=1` (the secure-world step), `gpuhold=1` (keep the GPU up after the self-tests),
-`metalplugin=1` (load the Metal driver), `gpurecover=0` (disable hang recovery).
+`metalplugin=1` (load the Metal driver). GPU hang-recovery and SMMU continue-after-fault are
+**off by default** (`0201`); the old experiments are `gpurecover=1` / `gpuhupcf=1`.
+
+The userspace Metal driver (Turnip) is built from Bergamota's `gpu/metal/` at a pinned commit;
+the recipe, the one fajita delta, the Linux compile-check and the macOS CI are under
+[`gpu/`](gpu/README.md). The kernel is already Turnip-ready (`0200`).
 
 | Stage | What it proves |
 | --- | --- |
@@ -182,9 +199,10 @@ graphics stack needs.
 ```
 xnu/patches/            the kernel patch series (apply in order)
 shim/                   the small loader the bootloader jumps to
+gpu/                    the Turnip driver recipe: pin.env, ios16-overlay.sh, host-check.sh
 tools/                  build, image, log and userspace helpers (xnu-cc.py = local compile check)
 dtb/                    the device trees dumped from the phone
-docs/                   gpu-progress.md, gpu-reference-audit.md, and more
+docs/                   gpu-turnip-bringup.md, connectivity-research.md, coding-practices.md, and more
 shim/out/, xnu/out/     build products (not committed)
 NOTES-FAJITA.md         the working handoff: state, registers, traps, next steps
 PORTING.md              hardware notes and the bring-up plan
@@ -195,9 +213,11 @@ PORTING.md              hardware notes and the bring-up plan
 - [ios-sweet](https://github.com/dipa-studio/ios-sweet) — the iOS 16 / XNU base this fork
   started from; `docs/IOS16_README.md` keeps that history.
 - HackiOS (`oosexgang`) — the Adreno bring-up ladder the GPU work follows.
-- [Bergamota](https://github.com/ry-diffusion/Bergamota) and
-  [Chlorophyll](https://github.com/ry-diffusion/Chlorophyll) — the SDM845/Adreno 630 kernel
-  bring-up, the msm-compatible IOKit user client, and the AIR→NIR→ir3 Metal driver.
+- [Bergamota](https://github.com/ry-diffusion/Bergamota) — the sibling XNU port for
+  beryllium (the same SDM845/Adreno 630). Its `gpu/metal/` is the Metal → Vulkan → Turnip
+  driver this project builds from (pinned), together with the `freedreno-sweet` libdrm shim
+  and the `renegade` signing tool;
+  [Chlorophyll](https://github.com/ry-diffusion/Chlorophyll) is that driver's upstream.
 - Reference designs studied for the GPU submit/fence/recovery work: msm/freedreno (Linux
   a6xx), [UniXNU/Adreno740](https://unixnu.com) and Cam396/Snapintosh (XNU-on-Adreno).
 - [theos/sdks](https://github.com/theos/sdks) — the iOS SDK used to build userland tools.

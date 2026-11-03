@@ -452,8 +452,8 @@ caveats, ⭐ method/precedent only.
 - Bergamota (`ry-diffusion`) — Turnip proven on the *same* SDM845/Adreno 630
   (`beryllium`); source of the `MSM_PARAM` values and the "drop Gallium, use
   Turnip" directive — ⭐⭐⭐ (same SoC).
-- Chlorophyll (`ferdza/chlorophyll@ios26`/`fajita`) — the Metal→Vulkan→Turnip
-  runtime we are adopting — ⭐⭐⭐.
+- The Turnip Metal runtime we adopt, built from **Bergamota `gpu/metal/`** at the
+  pinned commit (`../gpu/pin.env`); Chlorophyll is its upstream — ⭐⭐⭐.
 
 **Method-only references (different GPU/transport — read for *shape*, not constants)**
 - UniXNU / Adreno740 — XNU IOKit GPU driver + `tu_knl_darwin.cc` native-backend
