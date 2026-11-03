@@ -6,18 +6,62 @@ the one upstream Chlorophyll already proved on the A630. See
 [`gpu-audit-2026-11.md`](gpu-audit-2026-11.md) for why.
 
 **Status (2026-11-03):**
-- Driver: **done upstream and on your GitHub** — `ferdza/chlorophyll`, branch
-  **`ios26`** (`d3cb665`). Turnip runtime `air/chl_vk.c` (~100 KB), AIR→NIR for
-  Vulkan `air/air_nir_vk.c`, Metal device `src/bgmtl.m`, build scripts under
-  `turnip/`. `tu_smoke` and the Metal probes pass on the A630 (Bergamota
-  boot-54/55 logs).
+- Driver: **done upstream and on your GitHub** — `ferdza/chlorophyll`. The iOS-26
+  line is branch `ios26` (`d3cb665`); the **iOS-16.7 adaptation for fajita is
+  branch `fajita`** (lower deployment target + CI + the host compile-check).
+  Turnip runtime `air/chl_vk.c` (~100 KB), AIR→NIR for Vulkan `air/air_nir_vk.c`,
+  Metal device `src/bgmtl.m`, build scripts under `turnip/`. `tu_smoke` and the
+  Metal probes pass on the A630 (Bergamota boot-54/55 logs).
+- iOS 16.7 fix (branch `fajita`): `ios26` built everything at
+  `-miphoneos-version-min=18.0`, which **will not load on iOS 16.7** (dyld
+  rejects a min-OS-18 dylib). Lowered to **16.0** across the build/test scripts.
+  The iOS-26 specifics in `bgmtl.m` are inert on 16.7 (they only answer the
+  `supportsMTL4*` queries with NO; no iOS-18-only API is called).
 - Kernel (fajita): **ready** — all selectors the Turnip shim uses are
   implemented, and `0200-fajita-gpu-turnip-params.patch` exposes the `MSM_PARAM`s
   Turnip queries (HIGHEST_BANK_BIT=15, UBWC_SWIZZLE=6, MACROTILE_MODE=0). Syncobjs
   are emulated in the `sweet_drm` shim, so no further kernel change is needed.
-- Remaining: **build on macOS + install on the device.** This cannot be done in a
-  Linux cloud session (the build is `clang -arch arm64e`, `-framework IOKit`,
-  macOS-only).
+- Remaining: build the iOS dylibs (macOS-only: `clang -arch arm64e`,
+  `-framework IOKit`) and install on the device. **No Mac? Build on GitHub CI**
+  (below). Validate locally first with the **host compile-check** (below) so CI
+  runs are not wasted.
+
+## Build via GitHub CI — no Mac needed
+
+`ferdza/chlorophyll` has a macOS Actions workflow, **`.github/workflows/turnip.yml`**
+(listed on `main`, run it against `fajita`). It checks out Bergamota for the
+`freedreno-sweet` libdrm stand-in, builds the `renegade` PAC-strip tool, lowers
+the shim's target to 16.0, clones Mesa 26.2.5, runs `turnip/build-turnip.sh` +
+`build-metal.sh`, and uploads the driver (`libchlorophyll.dylib`, `libdrm.2.dylib`,
+`bgmtl.o`, metallibs) as an artifact you download and install.
+
+```sh
+gh workflow run turnip.yml -R ferdza/chlorophyll --ref fajita
+gh run watch <id> -R ferdza/chlorophyll
+gh run download <id> -R ferdza/chlorophyll -n chlorophyll-turnip-a630-ios16
+```
+
+macOS runner minutes are ~10x, so it is `workflow_dispatch` only. It is a young
+workflow and may need a debug run or two (the first failed on the renegade step,
+now fixed).
+
+## Local compile-check — no Mac, no CI (save minutes)
+
+**`turnip/host-check.sh`** in `ferdza/chlorophyll` compiles the bug-prone part of
+the port on a plain **Linux** host (Mesa 26.2.5 + our patches + the AIR frontend +
+ir3 + Turnip + gallium freedreno) in minutes, catching broken patches and compile
+errors before a macOS CI run — the Chlorophyll analogue of the kernel's
+`tools/xnu-cc.py`. Proven green. It does **not** cover the iOS-only `bgmtl.m` /
+`chl_vk.c` / arm64e link, which still need the Mac build or CI.
+
+```sh
+# Linux deps: meson ninja python3-mako flex bison glslang-tools spirv-tools \
+#             libdrm-dev libzstd-dev zlib1g-dev pkg-config
+turnip/host-check.sh      # clones Mesa 26.2.5 on first run; PASS/FAIL in minutes
+```
+
+Workflow: edit the driver → `host-check.sh` until green → only then dispatch the
+macOS CI → download the artifact → install on the device.
 
 ## What runs where
 
