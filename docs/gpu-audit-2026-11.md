@@ -3,19 +3,52 @@
 A step-back audit of the Adreno/Metal kernel stack after the 0199 kernel
 **panicked on device** and rendering regressed (icons corrupted on the previous
 test). It compares our code against the reference drivers (UniXNU/Adreno740,
-msm/freedreno, Snapintosh) and recommends a direction. Written because the recent
-patch series (0195–0199) has not produced a validated improvement and now
-regresses — the concern that "our patches are making it worse" is, on the
-evidence below, correct for at least 0195 and 0199.
+msm/freedreno, Snapintosh) and recommends a direction.
 
-Observations are grounded in the code; the one claim I cannot prove without the
-panic log is flagged as a hypothesis.
+> **CORRECTION (2026-11-03, after further tracing).** The first draft of this
+> audit blamed a **CPU cache-coherency hole** (client maps cacheable, kernel
+> only barriers). That central mechanism is **withdrawn**: the userspace shim
+> maps every BO **write-combined** (`sweet_drm.c:989`,
+> `IOConnectMapMemory64(… kIOMapWriteCombineCache)`), and the kernel allocates
+> WC, so there are no cacheable CPU lines to go stale and the `dsb sy` in
+> `gem_flush()` is in fact correct. The kernel comment at `SweetAdreno.cpp:762`
+> ("the client writes through a cacheable mapping") is **stale/wrong**. What
+> survives is below under "What still holds". The coherency section is kept only
+> for the record, marked withdrawn.
+
+Observations are grounded in the code. Where the first draft over-reached, it is
+corrected inline rather than deleted, so the reasoning trail is visible.
+
+## What still holds (after the correction)
+
+1. **0199 (HUPCF) is the clear cause of the new panic.** It is the only runtime
+   change between 0198 (metal8: GPU-lost on a hang, **no panic**) and 0199
+   (**kernel panic**). "Continue past a fault" let a GPU that was about to fault
+   keep executing a bad draw and scribble over memory. **Gate it off.** No rebuild
+   is needed to prove this: the current kernel already has the `gpuhupcf=0`
+   boot-arg.
+2. **The hang is a shader-execution fault on a bad descriptor, not a coherency
+   bug.** In gpu-metal8 both IBs were fully consumed (`ib1/ib2 rem 0 dwords`), the
+   CP was idle on fetch, and the GPU faulted on a wild IOVA `0x14d78_0a8a2c00`
+   that appears in no BO and nowhere else in the log. That is a shader
+   dereferencing a **garbage resource descriptor** (bad texture/buffer base), to
+   be chased with device instrumentation (see the revised plan), not a CPU-cache
+   flush.
+3. **Recovery (0197) is the wrong mechanism for a630+GMU** — unchanged from the
+   device evidence: the bare `RBBM_SW_RESET` path cannot revive the GMU (OOB
+   `boot_slumber` timed out). The references do timer-hangcheck + GMU-mediated
+   restart + submission replay. Keep recovery **off** until re-architected.
+4. **Process:** keep every risky behavior boot-arg gated (we do), so one grouped
+   CI build still lets the user A/B single behaviors across boots.
+
+The rest of this document is the original first-draft reasoning; **§"How a BO
+flows" and the coherency claims are WITHDRAWN** per the correction above.
 
 ---
 
-## TL;DR
+## TL;DR (FIRST DRAFT — superseded by "What still holds" above)
 
-- **One root cause ties together all three recent failures** (corrupt icons,
+- ~~**One root cause ties together all three recent failures**~~ (corrupt icons,
   the wild fault address in gpu-metal8, the 0199 panic): the **BO cache-coherency
   model is broken on the ordinary-memory path**. The client maps buffers
   **cacheable**; on submit we must clean those dirty CPU lines to memory before
@@ -142,7 +175,28 @@ user felt.
 
 ---
 
-## Recommended plan
+## Revised plan (supersedes the first-draft plan below)
+
+1. **Safe kernel now, no rebuild.** Boot the current 0199 kernel with
+   **`gpuhupcf=0 gpurecover=0`**. HUPCF off removes the panic cause; recovery off
+   removes the ineffective reset. A GPU hang then becomes a clean, logged
+   GPU-lost (0196's bounded wait already killed the 100 s freeze). This also
+   *confirms* HUPCF as the panic cause if the panic disappears.
+2. **Make the defaults safe** in a small follow-up patch (default `gpuhupcf=0`,
+   `gpurecover=0`) so a fresh kernel is safe without extra boot-args.
+3. **Chase the real bug — the garbage descriptor (C), with device data.** Add
+   instrumentation that, on a hang, dumps the faulting draw's **resource
+   descriptors** (texture/buffer base addresses) from the state/const BOs, so we
+   can see which descriptor carries the wild base and whether it is a Mesa/ir3
+   codegen bug, a BO-lifetime/unmap race (BO freed while the GPU still refers to
+   it — a classic cause of wild GPU addresses, independent of coherency), or a
+   layout/stride error. This replaces the withdrawn WC rework.
+4. **Recovery, done right (B), later:** msm-style timer hangcheck + GMU-mediated
+   restart + per-client device-lost — only after the descriptor bug is fixed.
+
+---
+
+## First-draft plan (SUPERSEDED — kept for the record)
 
 **Phase 1 — stop the bleeding (safe kernel).**
 1. **Gate 0199 off by default** (`gpuhupcf=0` as default, or drop the patch).

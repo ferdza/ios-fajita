@@ -23,10 +23,12 @@ rendering on the OnePlus 6T, `fajita`).
   series (what each does and its state), findings, open questions to confirm on
   device, the long-term direction, and the **device test log**.
 - **[gpu-audit-2026-11.md](gpu-audit-2026-11.md)** — **step-back audit (2026-11-03)**
-  after the 0199 panic: one root cause (BO cache-coherency on the ordinary-memory
-  path) ties together the corrupt icons, the wild fault address, and the panic;
-  comparison to UniXNU/msm and a phased recovery plan. **Read this before adding
-  more GPU patches.**
+  after the 0199 panic. Conclusions (see "What still holds"): **HUPCF (0199)
+  caused the panic — gate it off**; the hang is a **shader faulting on a garbage
+  descriptor** (not a CPU-cache bug — the first-draft coherency theory is
+  withdrawn, the client already maps write-combined); recovery (0197) is the
+  wrong mechanism for a630+GMU. Comparison to UniXNU/msm. **Read this before
+  adding more GPU patches.**
 - **[gpu-reference-audit.md](gpu-reference-audit.md)** — line-level comparison of
   our code against the reference projects: prioritized findings, what is already
   addressed, and what remains.
