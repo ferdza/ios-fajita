@@ -428,3 +428,44 @@ upstream's Turnip runtime. The direction is proven on our exact GPU.
   or do we still want a *logged, fail-closed* GPU-lost (no reset) as the floor?
 - Appetite for the msm-style hangcheck/replay rework (B) now, or defer until the
   UI is smooth and correct?
+
+---
+
+## Addendum 2026-11-03 — additional documentation sources consulted
+
+Beyond the in-tree code references (msm `a6xx_gpu.c`, `a6xx.xml`, the shim), the
+Turnip direction was cross-checked against these. Quality rated for *our*
+purpose (a630 / SDM845 on XNU): ⭐⭐⭐ authoritative & on-target, ⭐⭐ useful with
+caveats, ⭐ method/precedent only.
+
+**Primary driver docs**
+- Mesa freedreno/Turnip driver docs (the userspace we run) — ⭐⭐⭐:
+  https://docs.mesa3d.org/drivers/freedreno.html
+- freedreno register DB `a6xx.xml` (the source of every a6xx constant; verify
+  here, never from an a7xx/a8xx file) — ⭐⭐⭐:
+  https://gitlab.freedesktop.org/mesa/mesa/-/blob/main/src/freedreno/registers/adreno/a6xx.xml
+- Linux `drivers/gpu/drm/msm/adreno` (a6xx submit / fence / cache model, the ABI
+  our kernel emulates) — ⭐⭐⭐:
+  https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/gpu/drm/msm/adreno
+
+**Working A630 / Metal precedents**
+- Bergamota (`ry-diffusion`) — Turnip proven on the *same* SDM845/Adreno 630
+  (`beryllium`); source of the `MSM_PARAM` values and the "drop Gallium, use
+  Turnip" directive — ⭐⭐⭐ (same SoC).
+- Chlorophyll (`ferdza/chlorophyll@ios26`/`fajita`) — the Metal→Vulkan→Turnip
+  runtime we are adopting — ⭐⭐⭐.
+
+**Method-only references (different GPU/transport — read for *shape*, not constants)**
+- UniXNU / Adreno740 — XNU IOKit GPU driver + `tu_knl_darwin.cc` native-backend
+  template; a7xx, so event/opcode numbers differ (e.g. `0x31` = `CACHE_CLEAN`
+  a7xx vs `CACHE_INVALIDATE` a6xx) — ⭐ (method only).
+- Snapintosh — XNU Adreno Metal/IOGPU on Snapdragon X2 Elite; newer Adreno, EL2
+  hypervisor path — ⭐ (method only): https://github.com/Snapintosh/Snapintosh
+- nullmoth/1401 — NVIDIA-on-macOS translation (AIR→SPIR-V→NVK); the value is the
+  *translation-layering discipline* (patch only the OS/DRM layer, keep the
+  upstream compiler), not any Adreno specifics — ⭐ (pattern only).
+
+**Takeaway unchanged:** every *working* Metal-on-Adreno path routes through
+Vulkan (Turnip); our gallium-ir3 path is the outlier. The sources above only
+strengthen that — the two ⭐⭐⭐ precedents are both Turnip, and both are on our
+exact or near-exact GPU.

@@ -10,6 +10,10 @@ rendering on the OnePlus 6T, `fajita`).
 - **[../PORTING.md](../PORTING.md)** — hardware notes and the bring-up plan.
 - **[../AGENTS.md](../AGENTS.md)** — working rules (handoff, commits, safety of
   destructive steps).
+- **[coding-practices.md](coding-practices.md)** — the blunt "pense bête"
+  rulebook: don't guess constants, read before theorising, fail closed, prove
+  the compile locally, admit wrongness fast. Each rule is a mistake we already
+  made.
 
 ## Overview
 
