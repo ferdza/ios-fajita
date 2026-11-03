@@ -35,6 +35,7 @@ Two problems remained, both addressed by the 0193–0198 series:
 | 0196 | Caps the ring-drain busy-wait at **3 s** (was 100 s — the freeze) | low | 🔨 device test pending |
 | 0197 | **GPU hang recovery**: reset the GPU core (RBBM_SW_RESET) + re-init the CP + reload the zap shader + advance the fence. Fail-closed, rate-limited (32/boot). **On by default**; `gpurecover=0` disables | medium | 🔨 device test pending |
 | 0198 | **Asynchronous submit**: no more wait-idle in the Metal submit path (the client waits on the fence itself) + the `gpu_ring_reserve` ring back-pressure | medium | 🔨 device test pending |
+| 0199 | **SMMU HUPCF** (continue-after-fault): sets SCTLR bit 8 so a GPU context fault no longer terminates the batch's remaining accesses — the GPU retires the batch and posts the fence instead of wedging. Matches UniXNU's `stall_on_fault=0, continue_after_fault=1`. **On by default**; `gpuhupcf=0` restores the stock SCTLR | low | 🔨 device test pending |
 
 The kernel base is assembled from the CI buildtree + `git apply`; every patch is
 **compile-checked locally** (`tools/xnu-cc.py`) before any CI run.
@@ -62,12 +63,24 @@ The kernel base is assembled from the CI buildtree + `git apply`; every patch is
   wrote, there is a risk of stale cache (the wallpaper not loading, graphical
   glitches?). Two options (write-combined vs targeted invalidation) — **decide
   after the device test.**
-- **SMMU fault stall** (Finding 4): if the SMMU stalls on a fault, a single bad
-  access can cause the hang. The context bank is owned by the hypervisor, so it
-  is hard to change; 0197 is the safety net.
-- **Recovery hardening** (Finding 5): if RBBM_SW_RESET alone does not bring the
-  GPU back, move to a GMU-mediated reset with a fully acknowledged bus drain
-  (as Snapintosh does).
+- **SMMU fault wedge** (Finding 4) — **root-caused on device (gpu-metal8)** and
+  addressed by **0199**. The hang is a **GPU IOMMU translation fault** (context
+  bank 1, `FSR 0x402` = `TF`, on a wild IOVA `0x14d78_0a8a2c00` that is in no BO).
+  Our context banks already run **stall-on-fault off** (SCTLR `CFCFG`, bit 7, is
+  clear; the `FSR` stall-status bit `0x100` was not set, confirming no SMMU
+  stall), but **HUPCF (bit 8) was clear**, so after the fault the SMMU terminated
+  every later access of that context and the GPU wedged. 0199 sets HUPCF to match
+  UniXNU (`NativeAdrenoSmmuContext.cpp`: `stall_on_fault=0, continue_after_fault=1`).
+- **Recovery hardening** (Finding 5, *deferred — "B"*): the bare `RBBM_SW_RESET`
+  path (0197) **does not revive a630+GMU** — on device the recover re-bring-up of
+  the GX rail timed out on the GMU OOB `boot_slumber` handshake (`INTR_INFO 0` vs
+  `0x40000000` at boot) → `GPU lost`. The real fix is a **GMU-mediated reset**
+  (power-collapse + reboot via rpmh), as msm/freedreno `a6xx_recover` does, not a
+  register-level reset. Only needed for a true lockup; with 0199 a page fault no
+  longer wedges, so this is no longer the first line of defence.
+- **Wild-address root cause** (*deferred — "C"*): *why* the frame-12/13 command
+  references `0x14d78_0a8a2c00` (a command-stream / descriptor bug). The ib1/ib2
+  CP packets are dumped in the gpu-metal8 log; needs a packet-level analysis.
 
 ## Long-term direction
 
@@ -80,9 +93,6 @@ hook. A large effort; see [`gpu-multiring-design.md`](gpu-multiring-design.md).
 | Date | Kernel (short SHA) | Boot args | Result |
 | --- | --- | --- | --- |
 | 2026-11-02 | 0193+0194 | adreno=9 zap=1 gpuhold=1 metalplugin=1 | UI correct but a few FPS + freeze on a hang |
-| _to fill_ | 7147885 (0193→0198) | …metalplugin=1 (+ `gpurecover=1`) | _awaiting the test_ |
-
-> 0193→0198 kernel: CI run `41540055327`, SHA256
-> `7147885556c48c3128add8ca515985604e469c4b16ce10ecc9073424cabd4255`.
-> Built before 0197 was switched to on-by-default: for this exact binary, add
-> `gpurecover=1` to test recovery. The next build has it enabled by default.
+| 2026-11-02 | 0193→0198 (gpu-metal7) | …metalplugin=1 `gpurecover=1` | GPU rendered to fence 12, hung on 13; recovery (RBBM reset) failed at CP re-init → `GPU lost`. No 100 s freeze, no panic (fail-closed held) |
+| 2026-11-03 | 0193→0198 recover-v2 (gpu-metal8), CI `41547357270` | …metalplugin=1 (recovery on by default) | Same class: GPU rendered to fence 11, hung on 13 — a **GPU page fault** (SMMU cb1 `FSR 0x402`, wild IOVA). recover-v2 reached the new GX-rail re-bring-up but the GMU OOB handshake **timed out** → `GPU lost`. Root-caused → **0199** |
+| _to fill_ | 0193→0199 (HUPCF) | …metalplugin=1 (`gpuhupcf=0` to disable) | _awaiting the test: does the page fault still wedge, or does the GPU retire the batch and keep going?_ |

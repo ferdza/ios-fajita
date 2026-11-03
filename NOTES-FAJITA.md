@@ -6,7 +6,46 @@ hardware table and the plan; this file is the short handoff.
 
 ## State
 
-### NEXT SESSION — start here (2026-10-30): root reflashed; cause of the corruption found
+### NEXT SESSION — start here (2026-11-03): GPU freeze root-caused → 0199 (SMMU HUPCF)
+
+**Where GPU bring-up stands.** The iOS UI renders through Metal; the open problem
+is the freeze on a GPU hang. Two device logs (gpu-metal7, gpu-metal8) pinned it
+down:
+
+- The GPU renders a dozen fences then **hangs on a frame with a GPU IOMMU
+  translation fault**: `smmu cb1 FSR 0x402` (`TF` bit set) on a **wild IOVA
+  `0x14d78_0a8a2c00`** that is in **no BO** (the `GPU FIND` found 0 matches). So
+  it is a bad address in the command stream, not a random lockup.
+- Why it froze (not just dropped a frame): our SMMU GPU context already runs
+  **stall-on-fault OFF** (`SCTLR CFCFG`, bit 7, clear; `FSR` stall-status bit
+  `0x100` was not set), **but HUPCF (bit 8) was clear** → after the fault the
+  SMMU terminated every later access of that context, so the GPU could not
+  retire the batch and wedged (ring drained, GPU busy, fence never posts).
+- **0199 (`0199-fajita-gpu-smmu-hupcf.patch`)** sets HUPCF in `GPU_SCTLR_CB`
+  (`0x00c01067` → `0x00c01167`), matching UniXNU
+  (`NativeAdrenoSmmuContext.cpp`: `stall_on_fault=0, continue_after_fault=1`).
+  On by default; **`gpuhupcf=0`** restores the stock SCTLR. Validated locally
+  (`check-hunk-counts` 199 OK; `xnu-cc.py` 0/1 failed). Committed + pushed; CI
+  grouped build triggered (see the device test log in `docs/gpu-progress.md`).
+- **Recovery (0197) does NOT work on a630+GMU** — the bare `RBBM_SW_RESET` path,
+  even with the recover-v2 GX-rail re-bring-up, **times out on the GMU OOB
+  `boot_slumber` handshake** (`INTR_INFO 0` vs `0x40000000` at boot) → `GPU lost`.
+  No panic, fail-closed held. Still on by default but it is not the real fix.
+
+**Deferred, keep for later (user, 2026-11-03: "garde les autres en mémoire"):**
+- **B — GMU-mediated reset:** replace the bare RBBM reset with a GMU
+  power-collapse + reboot (rpmh), as msm/freedreno `a6xx_recover` does. Only
+  needed for a true lockup; with 0199 a page fault should no longer wedge.
+- **C — wild-address root cause:** find why frame 12/13 references
+  `0x14d78_0a8a2c00`. The ib1/ib2 CP packets are dumped in the gpu-metal8 log;
+  needs a packet-level walk.
+
+**Next concrete step:** test the 0199 kernel on device — does the page fault
+still wedge, or does the GPU retire the batch and keep going? Then decide B/C.
+
+---
+
+### Earlier handoff (2026-10-30): root reflashed; cause of the corruption found
 
 **ROOT CAUSE (proven):** a **stale backup GPT** sat in the last block of `userdata` (block
 0x1B800BA, from an old Linux image; disk GUID `24c8f14c-3f61-a64d-...`). Something on the phone

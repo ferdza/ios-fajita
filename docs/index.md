@@ -60,8 +60,11 @@ rendering on the OnePlus 6T, `fajita`).
 
 ---
 
-**Status (2026-11-02):** the iOS UI is rendered by the GPU through Metal. Current
+**Status (2026-11-03):** the iOS UI is rendered by the GPU through Metal. Current
 work is **performance** (0195 write-combined buffers, 0198 asynchronous submit)
-and **freezes** (0196 bounded ring-drain wait, 0197 GPU hang recovery, on by
-default). The 0193–0198 kernel is CI run `41540055327`. Details in
-[gpu-progress.md](gpu-progress.md).
+and **freezes**. Device testing (gpu-metal8) root-caused the freeze to a **GPU
+IOMMU page fault** that wedged the GPU because the SMMU context lacked **HUPCF**
+(continue-after-fault) → **0199** sets it (matching UniXNU). The bare-RBBM
+recovery (0197) does **not** revive a630+GMU on device; a GMU-mediated reset is
+deferred ("B"), as is the root cause of the wild fault address ("C"). Details and
+the device test log in [gpu-progress.md](gpu-progress.md).
